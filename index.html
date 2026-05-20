@@ -2006,7 +2006,7 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
         _animateVisualizer();
         const dimBtn = document.getElementById('btn-dim');
         if (dimBtn) dimBtn.classList.remove('hidden');
-        _startSpeechRecognition();
+       // Groq Whisper가 변환 담당 → Web Speech API 제거 (Google 검색 팝업 방지)
       } catch (e) {
         UI.toast('마이크 접근 권한이 필요합니다', 'error');
       }
@@ -2326,7 +2326,17 @@ function toggleDimScreen() {
       gap: 12px;
       cursor: pointer;
     `;
-    dimOverlay.innerHTML = '';
+    dimOverlay.innerHTML = `
+      <div style="
+        position:absolute;
+        top:10px;
+        right:14px;
+        width:6px;
+        height:6px;
+        border-radius:50%;
+        background:rgba(255,255,255,0.25);
+      "></div>
+    `;
     // 탭하면 즉시 밝기 복귀
     dimOverlay.addEventListener('click', toggleDimScreen);
     document.body.appendChild(dimOverlay);
@@ -2817,7 +2827,6 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
     let _ttsPlaying = false;
 
     function readAloud(id) {
-      // 이미 재생 중이면 중지
       if (_ttsPlaying) {
         speechSynthesis.cancel();
         _ttsPlaying = false;
@@ -2826,34 +2835,26 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
       }
       DB.getMemory(id).then(async m => {
         if (!m) return;
-        let text = m.title ? m.title + '. ' : '';
-        let content = m.content || '';
+        let text = (m.title ? m.title + '. ' : '') + (m.content || '');
         if (m.encrypted && AppState.get('pin')) {
-          try { content = await CryptoUtil.decrypt(m.content, AppState.get('pin')); } catch(e) {}
+          try { text = m.title + '. ' + await CryptoUtil.decrypt(m.content, AppState.get('pin')); }
+          catch(e) {}
         }
-        text += content;
         if (!text.trim()) { UI.toast('읽을 내용이 없습니다', 'info'); return; }
-
         if (!('speechSynthesis' in window)) {
-          UI.toast('이 기기는 TTS를 지원하지 않습니다', 'error'); return;
+          UI.toast('이 기기는 TTS 미지원', 'error'); return;
         }
         speechSynthesis.cancel();
-        _ttsUtterance = new SpeechSynthesisUtterance(text);
-        _ttsUtterance.lang = 'ko-KR';
-        _ttsUtterance.rate = 1.0;
-        _ttsUtterance.pitch = 1.0;
-        // 한국어 목소리 선택 (있으면)
+        const utt = new SpeechSynthesisUtterance(text);
+        utt.lang = 'ko-KR';
+        utt.rate = 1.0;
         const voices = speechSynthesis.getVoices();
-        const koVoice = voices.find(v => v.lang.startsWith('ko'));
-        if (koVoice) _ttsUtterance.voice = koVoice;
-
-        _ttsUtterance.onstart = () => {
-          _ttsPlaying = true;
-          UI.toast('🔊 읽기 시작 — 다시 탭하면 중지', 'info');
-        };
-        _ttsUtterance.onend = () => { _ttsPlaying = false; };
-        _ttsUtterance.onerror = () => { _ttsPlaying = false; };
-        speechSynthesis.speak(_ttsUtterance);
+        const ko = voices.find(v => v.lang.startsWith('ko'));
+        if (ko) utt.voice = ko;
+        utt.onstart = () => { _ttsPlaying = true; UI.toast('🔊 읽기 시작 — 다시 탭하면 중지', 'info'); };
+        utt.onend = () => { _ttsPlaying = false; };
+        utt.onerror = () => { _ttsPlaying = false; };
+        speechSynthesis.speak(utt);
       });
     }
 
@@ -3456,7 +3457,36 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
     return { init, navigate, goBack, goForward, canGoForward, getHistoryLength };
   })();
 
-  window.addEventListener('DOMContentLoaded', () => App.init());
+  window.addEventListener('DOMContentLoaded', () => {
+    App.init();
+
+    // ✅ 삼성 갤럭시 하드웨어 뒤로가기(<) 버튼 호환
+    // 앱 진입 시 초기 히스토리 스택 생성
+    history.pushState({ mvApp: true }, '');
+
+    window.addEventListener('popstate', (e) => {
+      // 하드웨어 뒤로가기 클릭 시
+      const screen = AppState.get('currentScreen');
+
+      // 잠금화면이면 앱 종료 (브라우저 기본 동작)
+      if (screen === 'lock') {
+        return;
+      }
+
+      // 홈화면이면 잠금
+      if (screen === 'home') {
+        history.pushState({ mvApp: true }, '');
+        AppState.set('isLocked', true);
+        AppState.set('pin', null);
+        LockScreen.show();
+        return;
+      }
+
+      // 나머지 화면은 이전 화면으로
+      history.pushState({ mvApp: true }, '');
+      App.goBack();
+    });
+  });
   </script>
 
 <script>
