@@ -770,6 +770,16 @@
           <div id="setup-hint" class="text-center text-slate-500 text-xs mt-4 hidden">
             <p>처음 사용 시 입력한 PIN이 비밀번호로 설정됩니다</p>
           </div>
+          <button id="btn-quick-rec"
+            onclick="LockScreen.quickRecord()"
+            style="
+              margin-top:24px;padding:14px 32px;border-radius:50px;
+              background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.4);
+              color:#f87171;font-size:14px;font-weight:600;cursor:pointer;
+              display:flex;align-items:center;gap:8px;
+            ">
+            🎤 빠른 녹음 (PIN 없이)
+          </button>
         </div>
       `;
       UI.refreshIcons();
@@ -921,7 +931,69 @@
   }
 }
 
-    return { show };
+   async function quickRecord() {
+      // PIN 없이 즉시 녹음 시작 → 임시 저장 → 나중에 PIN으로 확인 후 저장
+      let qMediaRecorder = null;
+      let qChunks = [];
+      let qSeconds = 0;
+      let qTimer = null;
+
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:#000;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;';
+      overlay.innerHTML = `
+        <p style="color:#475569;font-size:12px;letter-spacing:2px">⚡ 빠른 녹음</p>
+        <div id="qrec-timer" style="font-size:64px;font-weight:700;color:#f1f5f9;font-variant-numeric:tabular-nums">00:00</div>
+        <button id="qrec-stop" style="
+          width:140px;height:140px;border-radius:50%;background:#ef4444;
+          border:none;color:white;font-size:40px;cursor:pointer;
+          animation:dRecording 1s infinite;
+        ">⏹</button>
+        <p style="color:#475569;font-size:12px">탭하면 중지 후 저장</p>
+        <style>@keyframes dRecording{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.7)}50%{box-shadow:0 0 0 32px rgba(239,68,68,0)}}</style>
+      `;
+      document.body.appendChild(overlay);
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        qMediaRecorder = new MediaRecorder(stream);
+        qChunks = [];
+        qMediaRecorder.ondataavailable = e => qChunks.push(e.data);
+        qMediaRecorder.onstop = async () => {
+          stream.getTracks().forEach(t => t.stop());
+          overlay.remove();
+          const blob = new Blob(qChunks, { type: 'audio/webm' });
+          const reader = new FileReader();
+          reader.onload = async () => {
+            // 임시 저장 (PIN 없이 빠른 저장)
+            const title = `빠른녹음_${new Date().toLocaleTimeString('ko-KR')}`;
+            await DB.addMemory({
+              title, type: 'voice', content: '🎤 빠른 녹음 (텍스트 변환 필요)',
+              audioData: reader.result, tags: ['빠른녹음'], priority: 'medium',
+              folderId: null, encrypted: false
+            });
+            UI.toast('✅ 빠른 녹음 저장됨! PIN으로 로그인하면 확인하세요', 'success');
+          };
+          reader.readAsDataURL(blob);
+        };
+        qMediaRecorder.start();
+        qSeconds = 0;
+        const timerEl = overlay.querySelector('#qrec-timer');
+        qTimer = setInterval(() => {
+          qSeconds++;
+          timerEl.textContent = String(Math.floor(qSeconds/60)).padStart(2,'0') + ':' + String(qSeconds%60).padStart(2,'0');
+        }, 1000);
+
+        overlay.querySelector('#qrec-stop').addEventListener('click', () => {
+          clearInterval(qTimer);
+          qMediaRecorder.stop();
+        });
+      } catch(e) {
+        overlay.remove();
+        UI.toast('마이크 권한이 필요합니다', 'error');
+      }
+    }
+
+    return { show, quickRecord };
   })();
   </script>
 
@@ -1609,7 +1681,9 @@
     let animationId = null;
     let analyser = null;
     let editId = null;
-
+    let dimOverlay = null;
+    let wakeLock = null;
+    let silentAudio = null;   // ← 무음 오디오 객체
     async function show(params = {}) {
       AppState.set('currentScreen', 'addMemory');
       editId = params.id || null;
@@ -1636,14 +1710,42 @@
               <input type="text" id="mem-title" placeholder="음성 메모 제목" value="${_escapeHtml(editing?.title || '')}"/>
             </div>
             <div id="audio-list-area"></div>
+
+<!-- ✅ 삼성 녹음파일 업로드 버튼 추가 -->
+<div class="card mb-2" style="border:1px dashed #6366f1">
+  <p class="text-xs text-slate-400 mb-2">📁 삼성 녹음앱 파일 불러오기</p>
+  <button onclick="document.getElementById('audio-file-input').click()"
+    class="btn btn-secondary w-full flex items-center justify-center gap-2 text-sm">
+    <i data-lucide="upload" class="w-4 h-4"></i> 녹음파일 선택 (m4a · mp3 · wav)
+  </button>
+  <input type="file" id="audio-file-input"
+    accept="audio/*,.m4a,.mp3,.wav,.ogg,.aac,.weba"
+    multiple class="hidden"/>
+  <p class="text-xs text-slate-500 mt-2 text-center">
+    삼성 녹음앱 → 공유 → 파일저장 후 여기서 선택하세요
+  </p>
+</div>
             <div class="card text-center py-8">
               <div id="visualizer" class="voice-visualizer mb-4">
                 ${Array(20).fill(0).map(() => '<div class="voice-bar" style="height:4px"></div>').join('')}
               </div>
               <p id="rec-status" class="text-slate-400 text-sm mb-4">녹음 버튼을 눌러 시작하세요</p>
-              <div class="flex justify-center gap-4">
+
+<!-- ✅ 화면 어둡게 버튼 -->
+<button id="btn-dim" onclick="VoiceForm.toggleDimScreen()"
+  class="hidden w-full py-2 rounded-xl text-xs font-medium mb-2"
+  style="background:rgba(99,102,241,0.15);color:#a5b4fc;border:1px solid #6366f1">
+  🌙 화면 어둡게 (절전모드처럼) — 탭하면 복귀
+</button>
+              <div class="flex justify-center gap-4 items-center">
                 <button id="btn-rec" class="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center hover:bg-red-600 transition">
                   <i data-lucide="mic" class="w-6 h-6 text-white"></i>
+                </button>
+                <button onclick="VoiceForm.showDriveMode()"
+                  class="flex flex-col items-center justify-center w-12 h-12 rounded-full text-lg"
+                  style="background:rgba(99,102,241,0.2);border:1px solid #6366f1"
+                  title="운전모드 — 화면 전체 녹음">
+                  🚗
                 </button>
               </div>
               <div id="audio-player" class="hidden mt-4">
@@ -1654,6 +1756,7 @@
               <label class="text-sm text-slate-400 mb-1 block">음성 인식 텍스트</label>
               <textarea id="mem-transcript" rows="4" placeholder="음성 인식된 텍스트가 여기에 표시됩니다...">${_escapeHtml(editing?.content || '')}</textarea>
             </div>
+            <div id="ai-actions" class="hidden" style="background:#1e293b;border-radius:12px;border:1px solid #6366f1;border-left:3px solid #6366f1;padding:14px;margin-top:-8px"></div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">폴더</label>
               <select id="mem-folder">
@@ -1681,8 +1784,29 @@
       _renderAudioList();
       document.getElementById('btn-rec').addEventListener('click', _toggleRecording);
       document.getElementById('btn-save').addEventListener('click', _save);
-    }
 
+// ✅ 삼성 녹음파일 업로드 처리
+document.getElementById('audio-file-input').addEventListener('change', (e) => {
+  Array.from(e.target.files).forEach(file => {
+    if (file.size > 100 * 1024 * 1024) {
+      UI.toast('100MB 이하 파일만 가능합니다', 'error'); return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      audioDataList.push(ev.target.result);
+      _renderAudioList();
+      // 파일명을 제목으로 자동입력
+      const titleEl = document.getElementById('mem-title');
+      if (titleEl && !titleEl.value) {
+        titleEl.value = file.name.replace(/\.[^/.]+$/, '');
+      }
+      UI.toast('✅ 녹음파일 추가됨! 저장 후 AI 변환하세요', 'success');
+    };
+    reader.readAsDataURL(file);
+  });
+  e.target.value = '';
+  });
+}
     function _renderAudioList() {
       const container = document.getElementById('audio-list-area');
       if (!container) return;
@@ -1699,6 +1823,51 @@
     function removeAudio(index) {
       audioDataList.splice(index, 1);
       _renderAudioList();
+    }
+
+// ══ 1번+2번: 백그라운드 생존 시스템 ══
+    async function _acquireWakeLock() {
+      // 2번: 화면 꺼짐 차단
+      if ('wakeLock' in navigator) {
+        try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
+      }
+      // 1번: 무음 오디오 → OS가 "음악 앱 실행 중"으로 인식 → 탭 생존
+      try {
+        const SILENT = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV6urq6urq6urq6urq6urq6urq6urq6urq6v////////////////////////////////8AAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAAJAAAAAAAAAAAASDs90hvAAAAAAAAAAAAAAAAAAAA//MUZAAAAAGkAAAAAAAAA0gAAAAATEFN//MUZAMAAAGkAAAAAAAAA0gAAAAARTMu//MUZAYAAAGkAAAAAAAAA0gAAAAAOTku//MUZAkAAAGkAAAAAAAAA0gAAAAANVVV';
+        silentAudio = new Audio(SILENT);
+        silentAudio.loop = true;
+        silentAudio.volume = 0.001;
+        await silentAudio.play();
+      } catch(e) {}
+    }
+
+    function _releaseWakeLock() {
+      if (wakeLock) { wakeLock.release().catch(()=>{}); wakeLock = null; }
+      if (silentAudio) { silentAudio.pause(); silentAudio.src = ''; silentAudio = null; }
+    }
+
+    async function _onVisibilityChange() {
+      if (document.visibilityState === 'visible' && isRecording) await _acquireWakeLock();
+    }
+
+    // ══ 3번: AI 액션 아이템 자동 추출 ══
+    async function _extractActionItems(text) {
+      if (!text || !AppState.get('geminiApiKey')) return;
+      try {
+        const result = await AbacusAI.callLLM(
+          `다음 텍스트에서 할 일, 연락, 일정, 확인 사항 등 액션 아이템만 추출해서 번호 목록으로 출력하세요. 없으면 "없음"이라고만 하세요:\n\n${text}`,
+          '당신은 비서입니다. 액션 아이템 번호 목록만 출력하세요. 다른 말은 하지 마세요.'
+        );
+        if (!result || result.trim() === '없음') return;
+        const el = document.getElementById('ai-actions');
+        if (el) {
+          el.innerHTML = `
+            <p style="font-size:12px;color:#a5b4fc;font-weight:600;margin-bottom:6px">✅ AI 액션 아이템 자동 추출</p>
+            <p style="font-size:13px;color:#e2e8f0;white-space:pre-wrap;line-height:1.6">${_escapeHtml(result.trim())}</p>
+          `;
+          el.classList.remove('hidden');
+        }
+      } catch(e) {}
     }
 
     async function _toggleRecording() {
@@ -1747,8 +1916,9 @@
             const text = await AbacusAI.transcribeAudio(audioBlob);
             if (text && text.trim()) {
               if (transcriptEl) transcriptEl.value = text.trim();
-              if (statusEl) statusEl.textContent = '✅ 변환 완료!';
+             if (statusEl) statusEl.textContent = '✅ 변환 완료!';
               UI.toast('음성이 텍스트로 변환되었어요!', 'success');
+              _extractActionItems(text.trim());
             } else {
               if (statusEl) statusEl.textContent = '⚠️ 변환 결과 없음 (직접 입력해주세요)';
             }
@@ -1767,10 +1937,14 @@
       };
         mediaRecorder.start();
         isRecording = true;
+        await _acquireWakeLock();
+        document.addEventListener('visibilitychange', _onVisibilityChange);
 
-        document.getElementById('rec-status').textContent = '녹음 중...';
+        document.getElementById('rec-status').textContent = '🔴 녹음 중 (화면잠금 방지됨)';
         document.getElementById('btn-rec').style.background = '#dc2626';
         _animateVisualizer();
+        const dimBtn = document.getElementById('btn-dim');
+        if (dimBtn) dimBtn.classList.remove('hidden');
         _startSpeechRecognition();
       } catch (e) {
         UI.toast('마이크 접근 권한이 필요합니다', 'error');
@@ -1786,9 +1960,14 @@
       }
       isRecording = false;
       cancelAnimationFrame(animationId);
-      document.getElementById('rec-status').textContent = '녹음 완료';
+      _releaseWakeLock();
+      document.removeEventListener('visibilitychange', _onVisibilityChange);
+      document.getElementById('rec-status').textContent = '✅ 녹음 완료 — 변환 중...';
       document.getElementById('btn-rec').style.background = '#ef4444';
       document.querySelectorAll('.voice-bar').forEach(b => b.style.height = '4px');
+      const dimBtn = document.getElementById('btn-dim');
+      if (dimBtn) dimBtn.classList.add('hidden');
+      if (dimOverlay) { dimOverlay.remove(); dimOverlay = null; }
     }
 
     function _animateVisualizer() {
@@ -1848,7 +2027,130 @@
       }
     }
 
-    return { show, removeAudio };
+// ══ 운전모드 UI ══
+    let driveModeOverlay = null;
+    let driveTimerInterval = null;
+
+    function showDriveMode() {
+      if (driveModeOverlay) return;
+      driveModeOverlay = document.createElement('div');
+      driveModeOverlay.style.cssText = 'position:fixed;inset:0;background:#000;z-index:99998;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;';
+      driveModeOverlay.innerHTML = `
+        <p style="color:#475569;font-size:12px;letter-spacing:3px;text-transform:uppercase">🚗 운전모드</p>
+        <div id="drive-timer" style="font-size:72px;font-weight:700;color:#f1f5f9;font-variant-numeric:tabular-nums;letter-spacing:-2px">00:00</div>
+        <button id="drive-btn" style="
+          width:160px;height:160px;border-radius:50%;
+          background:#ef4444;border:none;cursor:pointer;
+          display:flex;flex-direction:column;align-items:center;
+          justify-content:center;gap:8px;color:white;
+          animation:dPulse 2s infinite;
+        ">
+          <span style="font-size:48px">🎤</span>
+          <span id="drive-label" style="font-size:13px;font-weight:600">탭하여 녹음 시작</span>
+        </button>
+        <p style="color:#334155;font-size:12px;text-align:center;line-height:1.8">
+          중지 후 자동 텍스트 변환 · AI 액션 아이템 추출
+        </p>
+        <button id="drive-exit" style="
+          position:absolute;top:16px;right:16px;
+          background:none;border:none;color:#475569;
+          font-size:28px;cursor:pointer;padding:8px;
+        ">✕</button>
+        <style>
+          @keyframes dPulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.5)}70%{box-shadow:0 0 0 24px rgba(239,68,68,0)}}
+          @keyframes dRecording{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,.7)}50%{box-shadow:0 0 0 36px rgba(220,38,38,0)}}
+        </style>
+      `;
+      document.body.appendChild(driveModeOverlay);
+
+      let secs = 0;
+      const timerEl = driveModeOverlay.querySelector('#drive-timer');
+      const btn = driveModeOverlay.querySelector('#drive-btn');
+      const label = driveModeOverlay.querySelector('#drive-label');
+      const exit = driveModeOverlay.querySelector('#drive-exit');
+
+      btn.addEventListener('click', async () => {
+        if (!isRecording) {
+          await _startRecording();
+          label.textContent = '탭하여 중지';
+          btn.style.background = '#dc2626';
+          btn.style.animation = 'dRecording 1s infinite';
+          secs = 0;
+          driveTimerInterval = setInterval(() => {
+            secs++;
+            timerEl.textContent = String(Math.floor(secs/60)).padStart(2,'0') + ':' + String(secs%60).padStart(2,'0');
+          }, 1000);
+        } else {
+          _stopRecording();
+          clearInterval(driveTimerInterval);
+          label.textContent = '🤖 변환 중...';
+          btn.style.background = '#6366f1';
+          btn.style.animation = 'none';
+          setTimeout(() => {
+            if (driveModeOverlay) { driveModeOverlay.remove(); driveModeOverlay = null; }
+          }, 4000);
+        }
+      });
+
+      exit.addEventListener('click', () => {
+        if (isRecording) _stopRecording();
+        clearInterval(driveTimerInterval);
+        driveModeOverlay.remove();
+        driveModeOverlay = null;
+      });
+    }
+
+   // ✅ 화면 어둡게 기능
+
+function toggleDimScreen() {
+  if (dimOverlay) {
+    // 밝기 복귀
+    dimOverlay.remove();
+    dimOverlay = null;
+    UI.toast('화면 밝기 복귀됨 🌕', 'info');
+  } else {
+    // 화면을 거의 까맣게 (0.02 = 아주 약간만 빛남)
+    dimOverlay = document.createElement('div');
+    dimOverlay.style.cssText = `
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.97);
+      z-index: 99999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      cursor: pointer;
+    `;
+    dimOverlay.innerHTML = `
+      <div style="
+        width:12px;height:12px;
+        border-radius:50%;
+        background:#6366f1;
+        animation:pulse 2s infinite;
+        box-shadow:0 0 12px #6366f1
+      "></div>
+      <p style="color:rgba(255,255,255,0.15);font-size:11px">
+        🔴 녹음 중 — 화면을 탭하면 복귀
+      </p>
+      <style>
+        @keyframes pulse {
+          0%,100%{opacity:0.4;transform:scale(1)}
+          50%{opacity:1;transform:scale(1.3)}
+        }
+      </style>
+    `;
+    // 탭하면 즉시 밝기 복귀
+    dimOverlay.addEventListener('click', toggleDimScreen);
+    document.body.appendChild(dimOverlay);
+    UI.toast('화면 어두워짐 🌙 녹음은 계속 중!', 'info');
+  }
+}
+
+// 녹음 종료 시 dimOverlay 자동 제거
+
+return { show, removeAudio, toggleDimScreen, showDriveMode };
   })();
   </script>
 
@@ -2178,6 +2480,9 @@
         ${NavBar.render(memory.title || '기억 보기')}
         <div class="p-4 pb-24 nav-content-offset fade-in">
           <div class="flex items-center justify-end mb-4 gap-2">
+            <button onclick="ViewMemoryScreen.readAloud(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800" title="읽어주기">
+              <i data-lucide="volume-2" class="w-5 h-5 text-green-400"></i>
+            </button>
             <button onclick="ViewMemoryScreen.edit(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800">
               <i data-lucide="edit" class="w-5 h-5 text-blue-400"></i>
             </button>
@@ -2207,7 +2512,43 @@
           </div>
         </div>
       `;
-      UI.refreshIcons();
+     UI.refreshIcons();
+      _loadRelatedMemories(memory);
+    }
+
+    async function _loadRelatedMemories(memory) {
+      const keywords = [
+        ...(memory.title || '').split(/\s+/).filter(w => w.length > 1),
+        ...(memory.tags || [])
+      ].slice(0, 5);
+      if (keywords.length === 0) return;
+
+      const all = await DB.getAllMemories();
+      const related = all.filter(m => {
+        if (m.id === memory.id) return false;
+        const hay = ((m.title || '') + ' ' + (m.content || '') + ' ' + (m.tags || []).join(' ')).toLowerCase();
+        return keywords.some(kw => hay.includes(kw.toLowerCase()));
+      }).slice(0, 4);
+
+      if (related.length === 0) return;
+      const container = document.querySelector('.space-y-4');
+      if (!container) return;
+
+      const section = document.createElement('div');
+      section.innerHTML = `
+        <div style="margin-top:8px">
+          <p style="font-size:12px;color:#a5b4fc;font-weight:600;margin-bottom:8px">🔗 연관 기억 (${related.length}개)</p>
+          ${related.map(m => `
+            <div onclick="App.navigate('viewMemory',{id:${m.id}})"
+              style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                     padding:10px 12px;margin-bottom:6px;cursor:pointer;">
+              <p style="font-size:13px;font-weight:500;color:#e2e8f0;margin:0 0 2px">${_escapeHtml(m.title || '제목 없음')}</p>
+              <p style="font-size:11px;color:#64748b;margin:0">${UI.formatDate(m.createdAt)} · ${m.type === 'text' ? '📝' : m.type === 'image' ? '🖼️' : m.type === 'document' ? '📄' : '🎤'}</p>
+            </div>
+          `).join('')}
+        </div>
+      `;
+      container.appendChild(section);
     }
 
     function edit(id) {
@@ -2283,7 +2624,51 @@
       }
     }
 
-    return { show, edit, remove, downloadDoc, downloadDocByIndex };
+    let _ttsUtterance = null;
+    let _ttsPlaying = false;
+
+    function readAloud(id) {
+      // 이미 재생 중이면 중지
+      if (_ttsPlaying) {
+        speechSynthesis.cancel();
+        _ttsPlaying = false;
+        UI.toast('🔇 읽기 중지', 'info');
+        return;
+      }
+      DB.getMemory(id).then(async m => {
+        if (!m) return;
+        let text = m.title ? m.title + '. ' : '';
+        let content = m.content || '';
+        if (m.encrypted && AppState.get('pin')) {
+          try { content = await CryptoUtil.decrypt(m.content, AppState.get('pin')); } catch(e) {}
+        }
+        text += content;
+        if (!text.trim()) { UI.toast('읽을 내용이 없습니다', 'info'); return; }
+
+        if (!('speechSynthesis' in window)) {
+          UI.toast('이 기기는 TTS를 지원하지 않습니다', 'error'); return;
+        }
+        speechSynthesis.cancel();
+        _ttsUtterance = new SpeechSynthesisUtterance(text);
+        _ttsUtterance.lang = 'ko-KR';
+        _ttsUtterance.rate = 1.0;
+        _ttsUtterance.pitch = 1.0;
+        // 한국어 목소리 선택 (있으면)
+        const voices = speechSynthesis.getVoices();
+        const koVoice = voices.find(v => v.lang.startsWith('ko'));
+        if (koVoice) _ttsUtterance.voice = koVoice;
+
+        _ttsUtterance.onstart = () => {
+          _ttsPlaying = true;
+          UI.toast('🔊 읽기 시작 — 다시 탭하면 중지', 'info');
+        };
+        _ttsUtterance.onend = () => { _ttsPlaying = false; };
+        _ttsUtterance.onerror = () => { _ttsPlaying = false; };
+        speechSynthesis.speak(_ttsUtterance);
+      });
+    }
+
+    return { show, edit, remove, downloadDoc, downloadDocByIndex, readAloud };
   })();
   </script>
 
@@ -2492,11 +2877,7 @@
               <div class="card">
                 <h3 class="text-sm font-semibold text-slate-400 mb-3">🔒 보안</h3>
                 <div class="space-y-3">
-                  <button onclick="SettingsScreen.changePin()" class="w-full text-left flex items-center justify-between p-2 rounded-lg hover:bg-slate-800">
-                    <span class="text-sm">PIN 변경</span>
-                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-500"></i>
-                  </button>
-                    <button onclick="SettingsScreen.changePin()" class="w-full text-left flex items-center justify-between p-2 rounded-lg hover:bg-slate-800">
+                <button onclick="SettingsScreen.changePin()" class="w-full text-left flex items-center justify-between p-2 rounded-lg hover:bg-slate-800">
                     <span class="text-sm">PIN 변경</span>
                     <i data-lucide="chevron-right" class="w-4 h-4 text-slate-500"></i>
                   </button>
