@@ -871,34 +871,55 @@
       }, 1000);
     }
 
-    async function _tryBiometric() {
-      if (!window.PublicKeyCredential) {
-        UI.toast('이 기기에서는 생체인증을 지원하지 않습니다', 'error');
-        return;
+   async function _tryBiometric() {
+  if (!window.PublicKeyCredential) {
+    UI.toast('이 기기에서는 생체인증을 지원하지 않습니다', 'error');
+    return;
+  }
+  // ① 저장된 지문 ID 확인
+  const savedId = localStorage.getItem('mv_biometric_id');
+  if (!savedId) {
+    UI.toast('설정 → 보안에서 지문을 먼저 등록하세요', 'info');
+    return;
+  }
+  try {
+    // ② Base64 → Uint8Array 변환
+    const rawId = Uint8Array.from(atob(savedId), c => c.charCodeAt(0));
+    // ③ 안드로이드 지문인식 팝업 호출 (allowCredentials 핵심!)
+    const credential = await navigator.credentials.get({
+      publicKey: {
+        challenge: window.crypto.getRandomValues(new Uint8Array(32)),
+        timeout: 60000,
+        userVerification: 'required',
+        rpId: location.hostname || 'localhost',
+        allowCredentials: [{          // ← 이게 없으면 지문을 못 찾음
+          id: rawId,
+          type: 'public-key',
+          transports: ['internal']   // internal = 기기 내장 센서만
+        }]
       }
-      try {
-        const credential = await navigator.credentials.get({
-          publicKey: {
-            challenge: window.crypto.getRandomValues(new Uint8Array(32)),
-            timeout: 60000,
-            userVerification: 'required',
-            rpId: location.hostname || 'localhost'
-          }
-        });
-        if (credential) {
-          const storedPin = await DB.getSetting('bioPin');
-          if (storedPin) {
-            AppState.set('pin', storedPin);
-            AppState.set('isLocked', false);
-            App.navigate('home');
-          } else {
-            UI.toast('먼저 PIN으로 로그인 후 생체인증을 등록하세요', 'info');
-          }
-        }
-      } catch (e) {
-        UI.toast('생체인증에 실패했습니다', 'error');
+    });
+    if (credential) {
+      const storedPin = await DB.getSetting('bioPin');
+      if (storedPin) {
+        AppState.set('pin', storedPin);
+        AppState.set('isLocked', false);
+        UI.toast('✅ 지문 인증 성공!', 'success');
+        App.navigate('home');
+      } else {
+        UI.toast('PIN으로 한 번 로그인 후 설정에서 지문을 다시 등록하세요', 'info');
       }
     }
+  } catch (e) {
+    if (e.name === 'NotAllowedError') {
+      UI.toast('지문 인증이 취소되었습니다', 'error');
+    } else if (e.name === 'SecurityError') {
+      UI.toast('HTTPS 환경에서만 지문인식이 작동합니다', 'error');
+    } else {
+      UI.toast('생체인증 실패 — PIN으로 입력하세요', 'error');
+    }
+  }
+}
 
     return { show };
   })();
@@ -2452,6 +2473,7 @@
       AppState.set('currentScreen', 'settings');
       AppState.set('currentTab', 'settings');
       const encEnabled = AppState.get('encryptionEnabled');
+      const isBioRegistered = !!localStorage.getItem('mv_biometric_id'); // ← 추가
       const geminiKey = AppState.get('geminiApiKey');
       const groqKey = AppState.get('groqApiKey');
       const groqModel = AppState.get('groqSttModel') || 'whisper-large-v3';
@@ -2474,6 +2496,21 @@
                     <span class="text-sm">PIN 변경</span>
                     <i data-lucide="chevron-right" class="w-4 h-4 text-slate-500"></i>
                   </button>
+                    <button onclick="SettingsScreen.changePin()" class="w-full text-left flex items-center justify-between p-2 rounded-lg hover:bg-slate-800">
+                    <span class="text-sm">PIN 변경</span>
+                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-500"></i>
+                  </button>
+                  <!-- ✅ 지문인식 등록/해제 (아래 추가) -->
+                  <div class="flex items-center justify-between p-2">
+                    <div>
+                      <span class="text-sm">지문인식 잠금 해제</span>
+                      <p class="text-xs text-slate-500 mt-0.5">${isBioRegistered ? '✅ 등록됨' : '⬜ 미등록'}</p>
+                    </div>
+                    ${isBioRegistered
+                      ? `<button onclick="SettingsScreen.disableBiometric()" class="btn btn-danger text-xs py-1.5 px-3">해제</button>`
+                      : `<button onclick="SettingsScreen.registerBiometric()" class="btn btn-primary text-xs py-1.5 px-3">🫆 등록</button>`
+                    }
+                  </div>
                   <div class="flex items-center justify-between p-2">
                     <span class="text-sm">암호화 사용</span>
                     <label class="relative inline-flex items-center cursor-pointer">
@@ -2705,7 +2742,56 @@
       LockScreen.show();
     }
 
-    return { show, changePin, saveApiKey, saveApiKeys, exportData, clearData, lock };
+    async function registerBiometric() {
+      const currentPin = AppState.get('pin');
+      if (!currentPin) { UI.toast('먼저 PIN으로 로그인하세요', 'error'); return; }
+      if (!window.PublicKeyCredential) { UI.toast('이 기기는 생체인증 미지원', 'error'); return; }
+      try {
+        const available = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+        if (!available) { UI.toast('지문센서를 찾을 수 없습니다', 'error'); return; }
+        const credential = await navigator.credentials.create({
+          publicKey: {
+            challenge: window.crypto.getRandomValues(new Uint8Array(32)),
+            rp: { name: '기억속 저장', id: location.hostname || 'localhost' },
+            user: {
+              id: window.crypto.getRandomValues(new Uint8Array(16)),
+              name: 'memory-vault-user',
+              displayName: '기억속 저장'
+            },
+            pubKeyCredParams: [
+              { alg: -7, type: 'public-key' },
+              { alg: -257, type: 'public-key' }
+            ],
+            authenticatorSelection: {
+              authenticatorAttachment: 'platform', // 기기 내장 지문만
+              userVerification: 'required',
+              residentKey: 'preferred'
+            },
+            timeout: 60000
+          }
+        });
+        const credId = btoa(String.fromCharCode(...new Uint8Array(credential.rawId)));
+        localStorage.setItem('mv_biometric_id', credId);
+        await DB.setSetting('bioPin', currentPin); // PIN을 DB에 보관 (지문 성공 시 복원용)
+        UI.toast('✅ 지문인식 등록 완료!', 'success');
+        show(); // 설정 화면 새로고침
+      } catch (e) {
+        if (e.name === 'InvalidStateError') UI.toast('이미 등록된 지문입니다. 해제 후 재등록하세요', 'error');
+        else if (e.name === 'NotAllowedError') UI.toast('지문 등록이 취소되었습니다', 'error');
+        else UI.toast('지문 등록 실패: ' + e.message, 'error');
+      }
+    }
+
+    function disableBiometric() {
+      UI.confirm('지문인식 해제', '지문인식을 해제하시겠습니까?', async () => {
+        localStorage.removeItem('mv_biometric_id');
+        await DB.setSetting('bioPin', null);
+        UI.toast('🗑️ 지문인식이 해제되었습니다', 'success');
+        show();
+      });
+    }
+
+    return { show, changePin, saveApiKey, saveApiKeys, exportData, clearData, lock, registerBiometric, disableBiometric };
   })();
   </script>
 
