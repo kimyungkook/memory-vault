@@ -2031,7 +2031,7 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
     let driveModeOverlay = null;
     let driveTimerInterval = null;
 
-    function showDriveMode() {
+function showDriveMode() {
       if (driveModeOverlay) return;
       driveModeOverlay = document.createElement('div');
       driveModeOverlay.style.cssText = 'position:fixed;inset:0;background:#000;z-index:99998;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;';
@@ -2048,7 +2048,7 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
           <span style="font-size:48px">🎤</span>
           <span id="drive-label" style="font-size:13px;font-weight:600">탭하여 녹음 시작</span>
         </button>
-        <p style="color:#334155;font-size:12px;text-align:center;line-height:1.8">
+        <p id="drive-hint" style="color:#334155;font-size:12px;text-align:center;line-height:1.8">
           중지 후 자동 텍스트 변환 · AI 액션 아이템 추출
         </p>
         <button id="drive-exit" style="
@@ -2063,40 +2063,182 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
       `;
       document.body.appendChild(driveModeOverlay);
 
+      // ✅ 핵심: 운전모드 전용 상태 변수 (공유 isRecording 안씀)
+      let driveRecording = false;
+      let driveLocked = false;     // 중지 후 재클릭 방지 잠금
       let secs = 0;
+
       const timerEl = driveModeOverlay.querySelector('#drive-timer');
       const btn = driveModeOverlay.querySelector('#drive-btn');
       const label = driveModeOverlay.querySelector('#drive-label');
+      const hintEl = driveModeOverlay.querySelector('#drive-hint');
       const exit = driveModeOverlay.querySelector('#drive-exit');
 
       btn.addEventListener('click', async () => {
-        if (!isRecording) {
-          await _startRecording();
+        // ✅ 잠금 중이면 클릭 무시 (중지 후 중복 방지)
+        if (driveLocked) return;
+
+        if (!driveRecording) {
+          // ── 녹음 시작 ──
+          driveRecording = true;
           label.textContent = '탭하여 중지';
           btn.style.background = '#dc2626';
           btn.style.animation = 'dRecording 1s infinite';
+          hintEl.textContent = '🔴 녹음 중... 탭하면 중지됩니다';
           secs = 0;
           driveTimerInterval = setInterval(() => {
             secs++;
-            timerEl.textContent = String(Math.floor(secs/60)).padStart(2,'0') + ':' + String(secs%60).padStart(2,'0');
+            timerEl.textContent =
+              String(Math.floor(secs / 60)).padStart(2, '0') + ':' +
+              String(secs % 60).padStart(2, '0');
           }, 1000);
+          await _startRecording();
+
         } else {
-          _stopRecording();
+          // ── 녹음 중지 ──
+          driveRecording = false;
+          driveLocked = true;        // ✅ 잠금 → 재클릭 방지
           clearInterval(driveTimerInterval);
-          label.textContent = '🤖 변환 중...';
+
+          // 버튼 UI → 변환 중 상태
           btn.style.background = '#6366f1';
           btn.style.animation = 'none';
-          setTimeout(() => {
-            if (driveModeOverlay) { driveModeOverlay.remove(); driveModeOverlay = null; }
-          }, 4000);
+          btn.style.cursor = 'default';
+          label.textContent = '🤖 변환 중...';
+          hintEl.textContent = 'AI가 텍스트로 변환하고 있어요';
+
+          // ✅ 운전모드 전용 자동저장 파이프라인
+          // mediaRecorder 강제 종료 후 onstop 대신 직접 처리
+          if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+          }
+          if (recognition) { try { recognition.stop(); } catch(e) {} }
+          isRecording = false;
+          cancelAnimationFrame(animationId);
+          _releaseWakeLock();
+          document.removeEventListener('visibilitychange', _onVisibilityChange);
+          document.querySelectorAll('.voice-bar').forEach(b => b.style.height = '4px');
+
+          // onstop 완료 대기 후 자동저장 실행
+          const waitStop = setInterval(async () => {
+            if (!audioChunks || audioChunks.length === 0) return;
+            clearInterval(waitStop);
+
+            const blob = new Blob(audioChunks, { type: 'audio/webm' });
+            audioChunks = [];
+
+            // ── Step 1: Groq 음성→텍스트 변환 ──
+            hintEl.textContent = '🎙️ Step 1/3 — 음성 텍스트 변환 중...';
+            let transcriptText = '';
+            const groqKey = AppState.get('groqApiKey');
+            if (groqKey) {
+              try {
+                transcriptText = await AbacusAI.transcribeAudio(blob) || '';
+              } catch(e) {
+                transcriptText = '';
+              }
+            }
+
+            // ── Step 2: Gemini 제목 자동 생성 ──
+            hintEl.textContent = '🤖 Step 2/3 — AI 제목 생성 중...';
+            let autoTitle = '';
+            const geminiKey = AppState.get('geminiApiKey');
+            if (geminiKey && transcriptText) {
+              try {
+                const titleResult = await AbacusAI.callLLM(
+                  `다음 음성 메모 내용을 보고 제목을 10자 이내로 만들어주세요. 제목만 출력하세요:\n\n${transcriptText}`,
+                  '제목만 출력하세요. 다른 말은 하지 마세요.'
+                );
+                autoTitle = (titleResult || '').trim().replace(/["']/g, '');
+              } catch(e) {}
+            }
+            // 제목 생성 실패 시 날짜+시간으로 대체
+            if (!autoTitle) {
+              const now = new Date();
+              autoTitle = `운전메모_${now.getMonth()+1}월${now.getDate()}일_${now.getHours()}시${now.getMinutes()}분`;
+            }
+
+            // ── Step 3: Gemini 액션아이템 추출 + 자동 저장 ──
+            hintEl.textContent = '💾 Step 3/3 — 저장 중...';
+            let actionText = '';
+            if (geminiKey && transcriptText) {
+              try {
+                const actionResult = await AbacusAI.callLLM(
+                  `다음 텍스트에서 할 일, 연락, 일정, 확인 사항 등 액션 아이템만 추출해서 번호 목록으로 출력하세요. 없으면 "없음"이라고만 하세요:\n\n${transcriptText}`,
+                  '액션 아이템 번호 목록만 출력하세요.'
+                );
+                if (actionResult && actionResult.trim() !== '없음') {
+                  actionText = '\n\n✅ [AI 액션 아이템]\n' + actionResult.trim();
+                }
+              } catch(e) {}
+            }
+
+            // 오디오 Base64 변환 후 DB 자동 저장
+            const audioReader = new FileReader();
+            audioReader.onload = async () => {
+              const finalContent = transcriptText
+                ? transcriptText + actionText
+                : '(음성 변환 실패 — 오디오 파일 확인)';
+
+              // AI 자동 태그 생성
+              let autoTags = ['운전메모', '음성'];
+              if (geminiKey && transcriptText) {
+                try {
+                  const tagResult = await AbacusAI.callLLM(
+                    `다음 텍스트의 핵심 키워드 3개를 쉼표로만 출력하세요:\n${transcriptText}`,
+                    '키워드 3개를 쉼표로만 출력하세요.'
+                  );
+                  if (tagResult) {
+                    const aiTags = tagResult.split(',').map(t => t.trim()).filter(Boolean);
+                    autoTags = [...autoTags, ...aiTags].slice(0, 5);
+                  }
+                } catch(e) {}
+              }
+
+              await DB.addMemory({
+                title: autoTitle,
+                type: 'voice',
+                content: finalContent,
+                audioData: audioReader.result,
+                tags: autoTags,
+                priority: 'medium',
+                folderId: null,
+                encrypted: false
+              });
+
+              // 완료 UI
+              timerEl.textContent = '✅';
+              btn.innerHTML = '<span style="font-size:36px">🎉</span>';
+              label.textContent = '저장 완료!';
+              hintEl.innerHTML = `
+                <span style="color:#4ade80;font-weight:600">"${autoTitle}"</span>
+                <br>으로 자동 저장되었어요!
+              `;
+              UI.toast(`✅ "${autoTitle}" 자동 저장 완료!`, 'success');
+
+              setTimeout(() => {
+                if (driveModeOverlay) {
+                  driveModeOverlay.remove();
+                  driveModeOverlay = null;
+                }
+              }, 3000);
+            };
+            audioReader.readAsDataURL(blob);
+          }, 300);
         }
       });
 
       exit.addEventListener('click', () => {
-        if (isRecording) _stopRecording();
-        clearInterval(driveTimerInterval);
-        driveModeOverlay.remove();
-        driveModeOverlay = null;
+        // 녹음 중이면 먼저 중지
+        if (driveRecording) {
+          driveRecording = false;
+          clearInterval(driveTimerInterval);
+          _stopRecording();
+        }
+        if (driveModeOverlay) {
+          driveModeOverlay.remove();
+          driveModeOverlay = null;
+        }
       });
     }
 
