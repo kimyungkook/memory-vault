@@ -2773,5 +2773,13 @@
   window.addEventListener('DOMContentLoaded', () => App.init());
   </script>
 
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js')
+    .then(() => console.log('SW 등록 완료'))
+    .catch(e => console.log('SW 오류:', e));
+}
+</script>
+
 </body>
 </html>
