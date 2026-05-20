@@ -2639,6 +2639,8 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
    * ViewMemoryScreen - View, edit, delete a single memory
    */
   window.ViewMemoryScreen = (() => {
+    let _ttsPlaying = false; // TTS 상태 변수 안전한 위치로 이동
+
     async function show(params = {}) {
       if (!params.id) { App.navigate('home'); return; }
       await HomeScreen._loadFolderMap();
@@ -2658,11 +2660,15 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
         imageHtml = imgs.map(img => `<img src="${img}" class="w-full rounded-lg max-h-80 object-contain bg-slate-900 mb-2"/>`).join('');
       }
 
-      // Multi-audio support
+      // 🚨 Multi-audio support (오디오 플레이어)
       let audioHtml = '';
       if (memory.audioData) {
         const auds = Array.isArray(memory.audioData) ? memory.audioData : [memory.audioData];
-        audioHtml = auds.map(aud => `<audio controls class="w-full mb-2" src="${aud}"></audio>`).join('');
+        // 오디오 플레이어 생성
+        audioHtml = auds.map(aud => `<audio controls class="w-full mb-3" style="height: 44px; border-radius: 8px;" src="${aud}"></audio>`).join('');
+      } else if (memory.type === 'voice') {
+        // 예전 에러 시절에 음성 데이터 없이 텍스트만 저장된 불량 메모를 위한 경고창
+        audioHtml = `<div style="padding: 12px; background: rgba(239,68,68,0.15); color: #f87171; border-radius: 8px; font-size: 12px; margin-bottom: 12px;">⚠️ 오디오 데이터가 소실되어 텍스트만 보존된 메모입니다.</div>`;
       }
 
       // Multi-doc support
@@ -2685,8 +2691,13 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
         `;
       }
 
-       <!-- ✅ 중앙에 명확하게 보이는 툴바 버튼 패널 -->
-         <div class="flex items-center justify-center mb-6 gap-3 p-2" style="background:#1e293b; border-radius:12px; border:1px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        ${NavBar.render(memory.title || '기억 보기')}
+        <div class="p-4 pb-24 nav-content-offset fade-in">
+          
+          <!-- ✅ 중앙에 명확하게 보이는 툴바 버튼 패널 -->
+          <div class="flex items-center justify-center mb-6 gap-3 p-2" style="background:#1e293b; border-radius:12px; border:1px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
             <button onclick="ViewMemoryScreen.readAloud(${memory.id})" class="btn btn-secondary flex items-center gap-1 flex-1 justify-center" style="padding:8px" title="읽어주기">
               <span style="font-size:18px">🔊</span> <span style="font-size:13px">읽기</span>
             </button>
@@ -2697,6 +2708,7 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
               <span style="font-size:18px">🗑️</span> <span style="font-size:13px">삭제</span>
             </button>
           </div>
+
           <div class="space-y-4">
             <h1 class="text-xl font-bold">${_escapeHtml(memory.title || '제목 없음')}</h1>
             <div class="flex items-center gap-2 text-sm text-slate-400 flex-wrap">
@@ -2705,9 +2717,12 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
               ${memory.priority ? `<span class="priority-badge ${memory.priority === 'high' ? 'priority-high' : memory.priority === 'medium' ? 'priority-medium' : 'priority-low'}">${memory.priority === 'high' ? '높음' : memory.priority === 'medium' ? '보통' : '낮음'}</span>` : ''}
               ${memory.folderId && HomeScreen.getFolderMap()[memory.folderId] ? `<span class="folder-badge-view">📁 ${_escapeHtml(HomeScreen.getFolderMap()[memory.folderId].name)}</span>` : ''}
             </div>
+            
+            <!-- 오디오 / 이미지 / 문서 출력 영역 -->
             ${imageHtml}
             ${audioHtml}
             ${docHtml}
+
             <div class="card">
               <p class="text-sm whitespace-pre-wrap">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>
             </div>
@@ -2719,7 +2734,7 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
           </div>
         </div>
       `;
-     UI.refreshIcons();
+      UI.refreshIcons();
       _loadRelatedMemories(memory);
     }
 
@@ -2786,7 +2801,6 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         return new Blob([bytes], { type: mime });
       } catch(e) {
-        console.error('dataUrlToBlob error:', e);
         return null;
       }
     }
@@ -2802,7 +2816,6 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
         a.click();
         setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 200);
       } else {
-        // fallback: direct data URL
         const a = document.createElement('a');
         a.href = dataUrl;
         a.download = fileName;
@@ -2814,11 +2827,8 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
 
     async function downloadDoc(id) {
       const m = await DB.getMemory(id);
-      if (m && m.docData) {
-        _triggerDownload(m.docData, m.docName || 'document');
-      } else {
-        UI.toast('문서 데이터를 찾을 수 없습니다', 'error');
-      }
+      if (m && m.docData) _triggerDownload(m.docData, m.docName || 'document');
+      else UI.toast('문서 데이터를 찾을 수 없습니다', 'error');
     }
 
     async function downloadDocByIndex(id, index) {
@@ -2835,8 +2845,9 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
       if (!('speechSynthesis' in window)) { UI.toast('TTS 미지원 기기', 'error'); return; }
       
       // 이미 말하고 있다면 즉시 중지
-      if (window.speechSynthesis.speaking) {
+      if (window.speechSynthesis.speaking || _ttsPlaying) {
         window.speechSynthesis.cancel();
+        _ttsPlaying = false;
         UI.toast('🔇 읽기 중지', 'info');
         return;
       }
@@ -2859,11 +2870,13 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
           const ko = voices.find(v => v.lang.includes('ko') || v.lang.includes('KO'));
           if (ko) utt.voice = ko;
           
-          utt.onstart = () => { UI.toast('🔊 읽기 시작 — 다시 탭하면 중지', 'info'); };
+          utt.onstart = () => { _ttsPlaying = true; UI.toast('🔊 읽기 시작 — 다시 탭하면 중지', 'info'); };
+          utt.onend = () => { _ttsPlaying = false; };
+          utt.onerror = () => { _ttsPlaying = false; };
           window.speechSynthesis.speak(utt);
         };
 
-        // 목소리 로딩 대기 (안드로이드/크롬 대응)
+        // 목소리 로딩 대기 (안드로이드 대응)
         if (window.speechSynthesis.getVoices().length === 0) {
           window.speechSynthesis.onvoiceschanged = () => {
             playTTS();
