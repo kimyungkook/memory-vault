@@ -1700,20 +1700,50 @@
         mediaRecorder = new MediaRecorder(stream);
         audioChunks = [];
         mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
-        mediaRecorder.onstop = () => {
-          audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-          const url = URL.createObjectURL(audioBlob);
-          document.getElementById('audio-el').src = url;
-          document.getElementById('audio-player').classList.remove('hidden');
-          // Also convert to data URL and add to list
-          const reader = new FileReader();
-          reader.onload = () => {
-            audioDataList.push(reader.result);
-            _renderAudioList();
-          };
-          reader.readAsDataURL(audioBlob);
-          stream.getTracks().forEach(t => t.stop());
+        mediaRecorder.onstop = async () => {
+        audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(audioBlob);
+        document.getElementById('audio-el').src = url;
+        document.getElementById('audio-player').classList.remove('hidden');
+
+        // 오디오 데이터 저장
+        const reader = new FileReader();
+        reader.onload = () => {
+          audioDataList.push(reader.result);
+          _renderAudioList();
         };
+        reader.readAsDataURL(audioBlob);
+        stream.getTracks().forEach(t => t.stop());
+
+        // ✅ Groq Whisper API로 음성 → 텍스트 변환
+        const groqKey = AppState.get('groqApiKey');
+        const statusEl = document.getElementById('rec-status');
+        const transcriptEl = document.getElementById('mem-transcript');
+
+        if (groqKey) {
+          if (statusEl) statusEl.textContent = '🤖 AI가 음성을 텍스트로 변환 중...';
+          try {
+            const text = await AbacusAI.transcribeAudio(audioBlob);
+            if (text && text.trim()) {
+              if (transcriptEl) transcriptEl.value = text.trim();
+              if (statusEl) statusEl.textContent = '✅ 변환 완료!';
+              UI.toast('음성이 텍스트로 변환되었어요!', 'success');
+            } else {
+              if (statusEl) statusEl.textContent = '⚠️ 변환 결과 없음 (직접 입력해주세요)';
+            }
+          } catch(e) {
+            if (statusEl) statusEl.textContent = '❌ 변환 실패 - 직접 입력해주세요';
+            UI.toast('Groq API 오류: ' + e.message, 'error');
+          }
+        } else {
+          if (statusEl) statusEl.textContent = '⚠️ Groq API 키 없음 - 설정에서 등록해주세요';
+          // Web Speech API 결과가 있으면 유지
+          const existing = transcriptEl ? transcriptEl.value : '';
+          if (!existing) {
+            UI.toast('설정 → Groq API 키를 등록하면 자동 변환돼요', 'info');
+          }
+        }
+      };
         mediaRecorder.start();
         isRecording = true;
 
