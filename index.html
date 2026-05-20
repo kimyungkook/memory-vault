@@ -975,20 +975,64 @@
         qMediaRecorder = new MediaRecorder(stream);
         qChunks = [];
         qMediaRecorder.ondataavailable = e => qChunks.push(e.data);
-        qMediaRecorder.onstop = async () => {
+       qMediaRecorder.onstop = async () => {
           stream.getTracks().forEach(t => t.stop());
-          overlay.remove();
           const blob = new Blob(qChunks, { type: 'audio/webm' });
+
+          // ✅ 오버레이를 변환 중 상태로 변경
+          overlay.querySelector('#qrec-stop').innerHTML = '🤖';
+          overlay.querySelector('#qrec-stop').style.background = '#6366f1';
+          overlay.querySelector('#qrec-stop').style.animation = 'none';
+          const hintQ = overlay.querySelector('p:last-child');
+          if (hintQ) hintQ.textContent = 'AI 텍스트 변환 중...';
+
           const reader = new FileReader();
           reader.onload = async () => {
-            // 임시 저장 (PIN 없이 빠른 저장)
+            const audioData = reader.result;
             const title = `빠른녹음_${new Date().toLocaleTimeString('ko-KR')}`;
+
+            // ✅ Groq 음성→텍스트 변환
+            let transcriptText = '🎤 빠른 녹음 (텍스트 변환 필요)';
+            const groqKey = AppState.get('groqApiKey');
+            if (groqKey) {
+              try {
+                const text = await AbacusAI.transcribeAudio(blob);
+                if (text && text.trim()) {
+                  transcriptText = text.trim();
+                }
+              } catch(e) {
+                transcriptText = '🎤 빠른 녹음 (변환 실패 — 직접 입력)';
+              }
+            }
+
+            // ✅ Gemini 자동 제목 생성
+            let autoTitle = title;
+            const geminiKey = AppState.get('geminiApiKey');
+            if (geminiKey && transcriptText && !transcriptText.startsWith('🎤')) {
+              try {
+                const titleResult = await AbacusAI.callLLM(
+                  `다음 음성 메모 내용을 보고 제목을 10자 이내로 만들어주세요. 제목만 출력하세요:\n\n${transcriptText}`,
+                  '제목만 출력하세요.'
+                );
+                if (titleResult && titleResult.trim()) {
+                  autoTitle = titleResult.trim().replace(/["']/g, '');
+                }
+              } catch(e) {}
+            }
+
             await DB.addMemory({
-              title, type: 'voice', content: '🎤 빠른 녹음 (텍스트 변환 필요)',
-              audioData: reader.result, tags: ['빠른녹음'], priority: 'medium',
-              folderId: null, encrypted: false
+              title: autoTitle,
+              type: 'voice',
+              content: transcriptText,
+              audioData,
+              tags: ['빠른녹음', '음성'],
+              priority: 'medium',
+              folderId: null,
+              encrypted: false
             });
-            UI.toast('✅ 빠른 녹음 저장됨! PIN으로 로그인하면 확인하세요', 'success');
+
+            overlay.remove();
+            UI.toast(`✅ "${autoTitle}" 저장 완료!`, 'success');
           };
           reader.readAsDataURL(blob);
         };
@@ -2282,24 +2326,7 @@ function toggleDimScreen() {
       gap: 12px;
       cursor: pointer;
     `;
-    dimOverlay.innerHTML = `
-      <div style="
-        width:12px;height:12px;
-        border-radius:50%;
-        background:#6366f1;
-        animation:pulse 2s infinite;
-        box-shadow:0 0 12px #6366f1
-      "></div>
-      <p style="color:rgba(255,255,255,0.15);font-size:11px">
-        🔴 녹음 중 — 화면을 탭하면 복귀
-      </p>
-      <style>
-        @keyframes pulse {
-          0%,100%{opacity:0.4;transform:scale(1)}
-          50%{opacity:1;transform:scale(1.3)}
-        }
-      </style>
-    `;
+    dimOverlay.innerHTML = '';
     // 탭하면 즉시 밝기 복귀
     dimOverlay.addEventListener('click', toggleDimScreen);
     document.body.appendChild(dimOverlay);
@@ -2638,14 +2665,17 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
       app.innerHTML = `
         ${NavBar.render(memory.title || '기억 보기')}
         <div class="p-4 pb-24 nav-content-offset fade-in">
-          <div class="flex items-center justify-end mb-4 gap-2">
-            <button onclick="ViewMemoryScreen.readAloud(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800" title="읽어주기">
+         <div class="flex items-center justify-end mb-4 gap-2">
+            <button onclick="ViewMemoryScreen.readAloud(${memory.id})"
+              class="p-2 rounded-lg hover:bg-slate-800" title="읽어주기">
               <i data-lucide="volume-2" class="w-5 h-5 text-green-400"></i>
             </button>
-            <button onclick="ViewMemoryScreen.edit(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800">
+            <button onclick="ViewMemoryScreen.edit(${memory.id})"
+              class="p-2 rounded-lg hover:bg-slate-800">
               <i data-lucide="edit" class="w-5 h-5 text-blue-400"></i>
             </button>
-            <button onclick="ViewMemoryScreen.remove(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800">
+            <button onclick="ViewMemoryScreen.remove(${memory.id})"
+              class="p-2 rounded-lg hover:bg-slate-800">
               <i data-lucide="trash-2" class="w-5 h-5 text-red-400"></i>
             </button>
           </div>
