@@ -1728,7 +1728,7 @@
 
   <!-- ==================== FORM: VOICE ==================== -->
   <script>
-  /**
+ /**
    * VoiceForm - Web Audio API visualizer + Speech-to-Text
    */
   window.VoiceForm = (() => {
@@ -1745,6 +1745,7 @@
     let dimOverlay = null;
     let wakeLock = null;
     let silentAudio = null;   // ← 무음 오디오 객체
+
     async function show(params = {}) {
       AppState.set('currentScreen', 'addMemory');
       editId = params.id || null;
@@ -1772,32 +1773,34 @@
             </div>
             <div id="audio-list-area"></div>
 
-<!-- ✅ 삼성 녹음파일 업로드 버튼 추가 -->
-<div class="card mb-2" style="border:1px dashed #6366f1">
-  <p class="text-xs text-slate-400 mb-2">📁 삼성 녹음앱 파일 불러오기</p>
-  <button onclick="document.getElementById('audio-file-input').click()"
-    class="btn btn-secondary w-full flex items-center justify-center gap-2 text-sm">
-    <i data-lucide="upload" class="w-4 h-4"></i> 녹음파일 선택 (m4a · mp3 · wav)
-  </button>
-  <input type="file" id="audio-file-input"
-    accept="audio/*,.m4a,.mp3,.wav,.ogg,.aac,.weba"
-    multiple class="hidden"/>
-  <p class="text-xs text-slate-500 mt-2 text-center">
-    삼성 녹음앱 → 공유 → 파일저장 후 여기서 선택하세요
-  </p>
-</div>
+            <!-- ✅ 삼성 녹음파일 업로드 버튼 추가 -->
+            <div class="card mb-2" style="border:1px dashed #6366f1">
+              <p class="text-xs text-slate-400 mb-2">📁 삼성 녹음앱 파일 불러오기</p>
+              <button onclick="document.getElementById('audio-file-input').click()"
+                class="btn btn-secondary w-full flex items-center justify-center gap-2 text-sm">
+                <i data-lucide="upload" class="w-4 h-4"></i> 녹음파일 선택 (m4a · mp3 · wav)
+              </button>
+              <input type="file" id="audio-file-input"
+                accept="audio/*,.m4a,.mp3,.wav,.ogg,.aac,.weba"
+                multiple class="hidden"/>
+              <p class="text-xs text-slate-500 mt-2 text-center">
+                삼성 녹음앱 → 공유 → 파일저장 후 여기서 선택하세요
+              </p>
+            </div>
+
             <div class="card text-center py-8">
               <div id="visualizer" class="voice-visualizer mb-4">
                 ${Array(20).fill(0).map(() => '<div class="voice-bar" style="height:4px"></div>').join('')}
               </div>
               <p id="rec-status" class="text-slate-400 text-sm mb-4">녹음 버튼을 눌러 시작하세요</p>
 
-<!-- ✅ 화면 어둡게 버튼 -->
-<button id="btn-dim" onclick="VoiceForm.toggleDimScreen()"
-  class="hidden w-full py-2 rounded-xl text-xs font-medium mb-2"
-  style="background:rgba(99,102,241,0.15);color:#a5b4fc;border:1px solid #6366f1">
-  🌙 화면 어둡게 (절전모드처럼) — 탭하면 복귀
-</button>
+              <!-- ✅ 화면 어둡게 버튼 -->
+              <button id="btn-dim" onclick="VoiceForm.toggleDimScreen()"
+                class="hidden w-full py-2 rounded-xl text-xs font-medium mb-2"
+                style="background:rgba(99,102,241,0.15);color:#a5b4fc;border:1px solid #6366f1">
+                🌙 화면 어둡게 (절전모드처럼) — 탭하면 복귀
+              </button>
+
               <div class="flex justify-center gap-4 items-center">
                 <button id="btn-rec" class="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center hover:bg-red-600 transition">
                   <i data-lucide="mic" class="w-6 h-6 text-white"></i>
@@ -1813,6 +1816,7 @@
                 <audio id="audio-el" controls class="w-full"></audio>
               </div>
             </div>
+
             <div>
               <label class="text-sm text-slate-400 mb-1 block">음성 인식 텍스트</label>
               <textarea id="mem-transcript" rows="4" placeholder="음성 인식된 텍스트가 여기에 표시됩니다...">${_escapeHtml(editing?.content || '')}</textarea>
@@ -1846,28 +1850,62 @@
       document.getElementById('btn-rec').addEventListener('click', _toggleRecording);
       document.getElementById('btn-save').addEventListener('click', _save);
 
-// ✅ 삼성 녹음파일 업로드 처리
-document.getElementById('audio-file-input').addEventListener('change', (e) => {
-  Array.from(e.target.files).forEach(file => {
-    if (file.size > 100 * 1024 * 1024) {
-      UI.toast('100MB 이하 파일만 가능합니다', 'error'); return;
-    }
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      audioDataList.push(ev.target.result);
-      _renderAudioList();
-      // 파일명을 제목으로 자동입력
-      const titleEl = document.getElementById('mem-title');
-      if (titleEl && !titleEl.value) {
-        titleEl.value = file.name.replace(/\.[^/.]+$/, '');
-      }
-      UI.toast('✅ 녹음파일 추가됨! 저장 후 AI 변환하세요', 'success');
-    };
-    reader.readAsDataURL(file);
-  });
-  e.target.value = '';
-  });
-}
+      // ✅ 삼성 녹음파일 업로드 처리 + 자동 AI 텍스트 변환(STT)
+      document.getElementById('audio-file-input').addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files);
+        for (const file of files) {
+          if (file.size > 100 * 1024 * 1024) {
+            UI.toast('100MB 이하 파일만 가능합니다', 'error'); continue;
+          }
+          
+          // 1. 기존 로직 유지: 파일 Base64 읽어서 플레이어 목록에 추가
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            audioDataList.push(ev.target.result);
+            _renderAudioList();
+            const titleEl = document.getElementById('mem-title');
+            if (titleEl && !titleEl.value) {
+              titleEl.value = file.name.replace(/\.[^/.]+$/, '');
+            }
+          };
+          reader.readAsDataURL(file);
+
+          // 2. 신규 추가: 업로드된 통화 녹음 파일 바로 AI 텍스트 변환 진행
+          const groqKey = AppState.get('groqApiKey');
+          if (groqKey) {
+            const statusEl = document.getElementById('rec-status');
+            const transcriptEl = document.getElementById('mem-transcript');
+            
+            if (statusEl) statusEl.textContent = '🤖 업로드 통화파일 AI 변환 중...';
+            UI.showLoading('통화 녹음 AI 분석 중...');
+            
+            try {
+              const text = await AbacusAI.transcribeAudio(file);
+              if (text && text.trim()) {
+                const currentVal = transcriptEl.value.trim();
+                transcriptEl.value = currentVal ? currentVal + '\n\n' + text.trim() : text.trim();
+                
+                if (statusEl) statusEl.textContent = '✅ 통화 파일 변환 완료!';
+                UI.toast('통화 내용이 텍스트로 변환되었습니다!', 'success');
+                
+                _extractActionItems(text.trim());
+              } else {
+                if (statusEl) statusEl.textContent = '⚠️ 변환 결과 없음 (음성이 없거나 잡음)';
+              }
+            } catch(err) {
+              if (statusEl) statusEl.textContent = '❌ 변환 실패';
+              UI.toast('AI 변환 실패: ' + err.message, 'error');
+            } finally {
+              UI.hideLoading();
+            }
+          } else {
+            UI.toast('✅ 파일 추가됨! (설정에서 Groq API 키를 입력하면 텍스트로 자동 변환됩니다)', 'success');
+          }
+        }
+        e.target.value = '';
+      });
+    } // <-- 이전에 빠졌던 show 함수의 닫는 중괄호 복구 완료!
+
     function _renderAudioList() {
       const container = document.getElementById('audio-list-area');
       if (!container) return;
@@ -1886,13 +1924,11 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
       _renderAudioList();
     }
 
-// ══ 1번+2번: 백그라운드 생존 시스템 ══
+    // ══ 1번+2번: 백그라운드 생존 시스템 ══
     async function _acquireWakeLock() {
-      // 2번: 화면 꺼짐 차단
       if ('wakeLock' in navigator) {
         try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
       }
-      // 1번: 무음 오디오 → OS가 "음악 앱 실행 중"으로 인식 → 탭 생존
       try {
         const SILENT = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV6urq6urq6urq6urq6urq6urq6urq6urq6v////////////////////////////////8AAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAAJAAAAAAAAAAAASDs90hvAAAAAAAAAAAAAAAAAAAA//MUZAAAAAGkAAAAAAAAA0gAAAAATEFN//MUZAMAAAGkAAAAAAAAA0gAAAAARTMu//MUZAYAAAGkAAAAAAAAA0gAAAAAOTku//MUZAkAAAGkAAAAAAAAA0gAAAAANVVV';
         silentAudio = new Audio(SILENT);
@@ -1952,50 +1988,47 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
         audioChunks = [];
         mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
         mediaRecorder.onstop = async () => {
-        audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-        const url = URL.createObjectURL(audioBlob);
-        document.getElementById('audio-el').src = url;
-        document.getElementById('audio-player').classList.remove('hidden');
+          audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          const url = URL.createObjectURL(audioBlob);
+          document.getElementById('audio-el').src = url;
+          document.getElementById('audio-player').classList.remove('hidden');
 
-        // 오디오 데이터 저장
-        const reader = new FileReader();
-        reader.onload = () => {
-          audioDataList.push(reader.result);
-          _renderAudioList();
-        };
-        reader.readAsDataURL(audioBlob);
-        stream.getTracks().forEach(t => t.stop());
+          const reader = new FileReader();
+          reader.onload = () => {
+            audioDataList.push(reader.result);
+            _renderAudioList();
+          };
+          reader.readAsDataURL(audioBlob);
+          stream.getTracks().forEach(t => t.stop());
 
-        // ✅ Groq Whisper API로 음성 → 텍스트 변환
-        const groqKey = AppState.get('groqApiKey');
-        const statusEl = document.getElementById('rec-status');
-        const transcriptEl = document.getElementById('mem-transcript');
+          const groqKey = AppState.get('groqApiKey');
+          const statusEl = document.getElementById('rec-status');
+          const transcriptEl = document.getElementById('mem-transcript');
 
-        if (groqKey) {
-          if (statusEl) statusEl.textContent = '🤖 AI가 음성을 텍스트로 변환 중...';
-          try {
-            const text = await AbacusAI.transcribeAudio(audioBlob);
-            if (text && text.trim()) {
-              if (transcriptEl) transcriptEl.value = text.trim();
-             if (statusEl) statusEl.textContent = '✅ 변환 완료!';
-              UI.toast('음성이 텍스트로 변환되었어요!', 'success');
-              _extractActionItems(text.trim());
-            } else {
-              if (statusEl) statusEl.textContent = '⚠️ 변환 결과 없음 (직접 입력해주세요)';
+          if (groqKey) {
+            if (statusEl) statusEl.textContent = '🤖 AI가 음성을 텍스트로 변환 중...';
+            try {
+              const text = await AbacusAI.transcribeAudio(audioBlob);
+              if (text && text.trim()) {
+                if (transcriptEl) transcriptEl.value = text.trim();
+                if (statusEl) statusEl.textContent = '✅ 변환 완료!';
+                UI.toast('음성이 텍스트로 변환되었어요!', 'success');
+                _extractActionItems(text.trim());
+              } else {
+                if (statusEl) statusEl.textContent = '⚠️ 변환 결과 없음 (직접 입력해주세요)';
+              }
+            } catch(e) {
+              if (statusEl) statusEl.textContent = '❌ 변환 실패 - 직접 입력해주세요';
+              UI.toast('Groq API 오류: ' + e.message, 'error');
             }
-          } catch(e) {
-            if (statusEl) statusEl.textContent = '❌ 변환 실패 - 직접 입력해주세요';
-            UI.toast('Groq API 오류: ' + e.message, 'error');
+          } else {
+            if (statusEl) statusEl.textContent = '⚠️ Groq API 키 없음 - 설정에서 등록해주세요';
+            const existing = transcriptEl ? transcriptEl.value : '';
+            if (!existing) {
+              UI.toast('설정 → Groq API 키를 등록하면 자동 변환돼요', 'info');
+            }
           }
-        } else {
-          if (statusEl) statusEl.textContent = '⚠️ Groq API 키 없음 - 설정에서 등록해주세요';
-          // Web Speech API 결과가 있으면 유지
-          const existing = transcriptEl ? transcriptEl.value : '';
-          if (!existing) {
-            UI.toast('설정 → Groq API 키를 등록하면 자동 변환돼요', 'info');
-          }
-        }
-      };
+        };
         mediaRecorder.start();
         isRecording = true;
         await _acquireWakeLock();
@@ -2006,7 +2039,6 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
         _animateVisualizer();
         const dimBtn = document.getElementById('btn-dim');
         if (dimBtn) dimBtn.classList.remove('hidden');
-       // Groq Whisper가 변환 담당 → Web Speech API 제거 (Google 검색 팝업 방지)
       } catch (e) {
         UI.toast('마이크 접근 권한이 필요합니다', 'error');
       }
@@ -2028,7 +2060,14 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
       document.querySelectorAll('.voice-bar').forEach(b => b.style.height = '4px');
       const dimBtn = document.getElementById('btn-dim');
       if (dimBtn) dimBtn.classList.add('hidden');
-      if (dimOverlay) { dimOverlay.remove(); dimOverlay = null; }
+      if (dimOverlay) { 
+        dimOverlay.remove(); dimOverlay = null; 
+        const themeMeta = document.querySelector('meta[name="theme-color"]');
+        if (themeMeta) themeMeta.setAttribute('content', '#6366f1');
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        }
+      }
     }
 
     function _animateVisualizer() {
@@ -2071,7 +2110,6 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
       const priority = document.getElementById('mem-priority').value;
       const tags = document.getElementById('mem-tags').value.split(',').map(t => t.trim()).filter(Boolean);
 
-      // Store as single or array
       const audioStore = audioDataList.length === 1 ? audioDataList[0] : (audioDataList.length > 0 ? [...audioDataList] : null);
 
       try {
@@ -2088,11 +2126,11 @@ document.getElementById('audio-file-input').addEventListener('change', (e) => {
       }
     }
 
-// ══ 운전모드 UI ══
+    // ══ 운전모드 UI ══
     let driveModeOverlay = null;
     let driveTimerInterval = null;
 
-function showDriveMode() {
+    function showDriveMode() {
       if (driveModeOverlay) return;
       driveModeOverlay = document.createElement('div');
       driveModeOverlay.style.cssText = 'position:fixed;inset:0;background:#000;z-index:99998;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;';
@@ -2124,9 +2162,8 @@ function showDriveMode() {
       `;
       document.body.appendChild(driveModeOverlay);
 
-      // ✅ 핵심: 운전모드 전용 상태 변수 (공유 isRecording 안씀)
       let driveRecording = false;
-      let driveLocked = false;     // 중지 후 재클릭 방지 잠금
+      let driveLocked = false; 
       let secs = 0;
 
       const timerEl = driveModeOverlay.querySelector('#drive-timer');
@@ -2136,11 +2173,9 @@ function showDriveMode() {
       const exit = driveModeOverlay.querySelector('#drive-exit');
 
       btn.addEventListener('click', async () => {
-        // ✅ 잠금 중이면 클릭 무시 (중지 후 중복 방지)
         if (driveLocked) return;
 
         if (!driveRecording) {
-          // ── 녹음 시작 ──
           driveRecording = true;
           label.textContent = '탭하여 중지';
           btn.style.background = '#dc2626';
@@ -2149,27 +2184,21 @@ function showDriveMode() {
           secs = 0;
           driveTimerInterval = setInterval(() => {
             secs++;
-            timerEl.textContent =
-              String(Math.floor(secs / 60)).padStart(2, '0') + ':' +
-              String(secs % 60).padStart(2, '0');
+            timerEl.textContent = String(Math.floor(secs / 60)).padStart(2, '0') + ':' + String(secs % 60).padStart(2, '0');
           }, 1000);
           await _startRecording();
 
         } else {
-          // ── 녹음 중지 ──
           driveRecording = false;
-          driveLocked = true;        // ✅ 잠금 → 재클릭 방지
+          driveLocked = true;
           clearInterval(driveTimerInterval);
 
-          // 버튼 UI → 변환 중 상태
           btn.style.background = '#6366f1';
           btn.style.animation = 'none';
           btn.style.cursor = 'default';
           label.textContent = '🤖 변환 중...';
           hintEl.textContent = 'AI가 텍스트로 변환하고 있어요';
 
-          // ✅ 운전모드 전용 자동저장 파이프라인
-          // mediaRecorder 강제 종료 후 onstop 대신 직접 처리
           if (mediaRecorder && mediaRecorder.state !== 'inactive') {
             mediaRecorder.stop();
           }
@@ -2180,7 +2209,6 @@ function showDriveMode() {
           document.removeEventListener('visibilitychange', _onVisibilityChange);
           document.querySelectorAll('.voice-bar').forEach(b => b.style.height = '4px');
 
-          // onstop 완료 대기 후 자동저장 실행
           const waitStop = setInterval(async () => {
             if (!audioChunks || audioChunks.length === 0) return;
             clearInterval(waitStop);
@@ -2188,19 +2216,13 @@ function showDriveMode() {
             const blob = new Blob(audioChunks, { type: 'audio/webm' });
             audioChunks = [];
 
-            // ── Step 1: Groq 음성→텍스트 변환 ──
             hintEl.textContent = '🎙️ Step 1/3 — 음성 텍스트 변환 중...';
             let transcriptText = '';
             const groqKey = AppState.get('groqApiKey');
             if (groqKey) {
-              try {
-                transcriptText = await AbacusAI.transcribeAudio(blob) || '';
-              } catch(e) {
-                transcriptText = '';
-              }
+              try { transcriptText = await AbacusAI.transcribeAudio(blob) || ''; } catch(e) {}
             }
 
-            // ── Step 2: Gemini 제목 자동 생성 ──
             hintEl.textContent = '🤖 Step 2/3 — AI 제목 생성 중...';
             let autoTitle = '';
             const geminiKey = AppState.get('geminiApiKey');
@@ -2213,13 +2235,11 @@ function showDriveMode() {
                 autoTitle = (titleResult || '').trim().replace(/["']/g, '');
               } catch(e) {}
             }
-            // 제목 생성 실패 시 날짜+시간으로 대체
             if (!autoTitle) {
               const now = new Date();
               autoTitle = `운전메모_${now.getMonth()+1}월${now.getDate()}일_${now.getHours()}시${now.getMinutes()}분`;
             }
 
-            // ── Step 3: Gemini 액션아이템 추출 + 자동 저장 ──
             hintEl.textContent = '💾 Step 3/3 — 저장 중...';
             let actionText = '';
             if (geminiKey && transcriptText) {
@@ -2234,14 +2254,9 @@ function showDriveMode() {
               } catch(e) {}
             }
 
-            // 오디오 Base64 변환 후 DB 자동 저장
             const audioReader = new FileReader();
             audioReader.onload = async () => {
-              const finalContent = transcriptText
-                ? transcriptText + actionText
-                : '(음성 변환 실패 — 오디오 파일 확인)';
-
-              // AI 자동 태그 생성
+              const finalContent = transcriptText ? transcriptText + actionText : '(음성 변환 실패 — 오디오 파일 확인)';
               let autoTags = ['운전메모', '음성'];
               if (geminiKey && transcriptText) {
                 try {
@@ -2267,14 +2282,10 @@ function showDriveMode() {
                 encrypted: false
               });
 
-              // 완료 UI
               timerEl.textContent = '✅';
               btn.innerHTML = '<span style="font-size:36px">🎉</span>';
               label.textContent = '저장 완료!';
-              hintEl.innerHTML = `
-                <span style="color:#4ade80;font-weight:600">"${autoTitle}"</span>
-                <br>으로 자동 저장되었어요!
-              `;
+              hintEl.innerHTML = `<span style="color:#4ade80;font-weight:600">"${autoTitle}"</span><br>으로 자동 저장되었어요!`;
               UI.toast(`✅ "${autoTitle}" 자동 저장 완료!`, 'success');
 
               setTimeout(() => {
@@ -2290,7 +2301,6 @@ function showDriveMode() {
       });
 
       exit.addEventListener('click', () => {
-        // 녹음 중이면 먼저 중지
         if (driveRecording) {
           driveRecording = false;
           clearInterval(driveTimerInterval);
@@ -2303,47 +2313,38 @@ function showDriveMode() {
       });
     }
 
-  
- // ✅ 화면 어둡게 기능 (완벽한 블랙 잠금화면 위장)
-function toggleDimScreen() {
-  const themeMeta = document.querySelector('meta[name="theme-color"]');
-  if (dimOverlay) {
-    dimOverlay.remove();
-    dimOverlay = null;
-    // 밝기 복귀 시 보라색 테마 원상복구
-    if (themeMeta) themeMeta.setAttribute('content', '#6366f1');
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
+    // ✅ 화면 어둡게 기능 (완벽한 블랙 잠금화면 위장)
+    function toggleDimScreen() {
+      const themeMeta = document.querySelector('meta[name="theme-color"]');
+      if (dimOverlay) {
+        dimOverlay.remove();
+        dimOverlay = null;
+        if (themeMeta) themeMeta.setAttribute('content', '#6366f1');
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        }
+        UI.toast('화면 밝기 복귀됨 🌕', 'info');
+      } else {
+        if (themeMeta) themeMeta.setAttribute('content', '#000000');
+        if (document.documentElement.requestFullscreen) {
+          document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+        }
+
+        dimOverlay = document.createElement('div');
+        dimOverlay.style.cssText = `
+          position: fixed;
+          top: -20px; left: -20px; right: -20px; bottom: -20px;
+          background-color: #000000 !important;
+          z-index: 2147483647 !important;
+          cursor: pointer;
+        `;
+        dimOverlay.innerHTML = '';
+        dimOverlay.addEventListener('click', toggleDimScreen);
+        document.body.appendChild(dimOverlay);
+      }
     }
-    UI.toast('화면 밝기 복귀됨 🌕', 'info');
-  } else {
-    // 절전 모드 진입 시 상단 상태바까지 완벽한 블랙으로 강제 변경
-    if (themeMeta) themeMeta.setAttribute('content', '#000000');
-    if (document.documentElement.requestFullscreen) {
-      document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
-    }
 
-    dimOverlay = document.createElement('div');
-    // 빈틈을 허용하지 않도록 화면 바깥까지 마진을 주고 완전 블랙 처리
-    dimOverlay.style.cssText = `
-      position: fixed;
-      top: -20px; left: -20px; right: -20px; bottom: -20px;
-      background-color: #000000 !important;
-      z-index: 2147483647 !important;
-      cursor: pointer;
-    `;
-    
-    // 점, 글씨 등 아무것도 넣지 않음 (완벽한 무에서 유)
-    dimOverlay.innerHTML = '';
-    
-    dimOverlay.addEventListener('click', toggleDimScreen);
-    document.body.appendChild(dimOverlay);
-  }
-}
-
-// 녹음 종료 시 dimOverlay 자동 제거
-
-return { show, removeAudio, toggleDimScreen, showDriveMode };
+    return { show, removeAudio, toggleDimScreen, showDriveMode };
   })();
   </script>
 
