@@ -4,9 +4,11 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
   <meta name="theme-color" content="#6366f1"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
   <title>Memory Vault - 기억속 저장</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>"/>
   <link id="manifest-link" rel="manifest"/>
   <!-- Tailwind CSS CDN -->
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
@@ -63,6 +65,28 @@
     @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     .empty-state { text-align: center; padding: 60px 20px; color: #64748b; }
     .tag { display: inline-block; background: rgba(99,102,241,0.15); color: #a5b4fc; padding: 2px 10px; border-radius: 20px; font-size: 12px; margin: 2px; }
+    /* Context menu for long-press */
+    .context-menu-overlay { position: fixed; inset: 0; z-index: 4000; }
+    .context-menu { position: absolute; background: #1e293b; border: 1px solid #475569; border-radius: 12px; padding: 6px; min-width: 160px; box-shadow: 0 12px 40px rgba(0,0,0,0.5); z-index: 4001; animation: fadeIn 0.15s ease; }
+    .context-menu-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; transition: background 0.15s; }
+    .context-menu-item:hover { background: #334155; }
+    .context-menu-item.danger { color: #f87171; }
+    .context-menu-item.danger:hover { background: rgba(239,68,68,0.15); }
+    /* Navigation bar */
+    .nav-bar { position: fixed; top: 0; left: 0; right: 0; background: #1e293b; border-bottom: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; z-index: 2000; height: 44px; }
+    .nav-bar button { padding: 6px 10px; border-radius: 8px; background: transparent; border: none; color: #e2e8f0; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 2px; white-space: nowrap; }
+    .nav-bar button:hover { background: #334155; }
+    .nav-bar button:disabled { opacity: 0.3; pointer-events: none; }
+    .nav-content-offset { padding-top: 52px; }
+    /* Selection mode highlight */
+    .card.selected-card { border-color: #6366f1; background: rgba(99,102,241,0.1); }
+    /* Folder badge */
+    .folder-badge { display: inline-flex; align-items: center; gap: 3px; background: rgba(99,102,241,0.15); color: #a5b4fc; border-radius: 4px; padding: 1px 6px; font-size: 10px; line-height: 16px; white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+    .folder-badge-view { display: inline-flex; align-items: center; gap: 4px; background: rgba(99,102,241,0.15); color: #a5b4fc; border-radius: 6px; padding: 2px 8px; font-size: 12px; line-height: 20px; }
+    /* Multi-file list in edit mode */
+    .file-list-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #0f172a; border-radius: 10px; margin-bottom: 6px; }
+    .file-list-item .remove-file { color: #f87171; cursor: pointer; padding: 4px; border-radius: 6px; }
+    .file-list-item .remove-file:hover { background: rgba(239,68,68,0.15); }
     @media (min-width: 768px) {
       #app { max-width: 480px; margin: 0 auto; box-shadow: 0 0 60px rgba(0,0,0,0.3); }
     }
@@ -84,8 +108,8 @@
       name: "기억속 저장 - Memory Vault",
       short_name: "Memory Vault",
       description: "안전한 개인 기억 저장소 PWA",
-      start_url: "/",
-      scope: "/",
+      start_url: "./",
+      scope: "./",
       display: "standalone",
       orientation: "portrait",
       theme_color: "#6366f1",
@@ -171,14 +195,17 @@
       });
     `;
 
-   if ('serviceWorker' in navigator) {
-      const swBlob = new Blob([swCode], { type: 'application/javascript' });
-      const swURL = URL.createObjectURL(swBlob);
-      navigator.serviceWorker.register(swURL).then((reg) => {
-        console.log('[SW] Registered via Blob URL', reg.scope);
-      }).catch((err) => {
-        console.warn('[SW] Registration failed:', err);
-      });
+    if ('serviceWorker' in navigator) {
+      // Blob URL 기반 SW 등록은 대부분 브라우저에서 지원하지 않습니다.
+      // 별도 sw.js 파일이 있는 경우에만 등록합니다.
+      if (window.location.protocol === 'https:' || window.location.hostname === 'localhost') {
+        navigator.serviceWorker.register('./sw.js', { scope: './' }).then((reg) => {
+          console.log('[SW] Registered', reg.scope);
+        }).catch((err) => {
+          // sw.js 파일이 없는 경우 조용히 무시 (단일 HTML 파일 모드)
+          console.info('[SW] sw.js 파일이 없습니다. 오프라인 캐싱이 비활성화됩니다.');
+        });
+      }
     }
   })();
   </script>
@@ -361,9 +388,15 @@
       pin: null,
       searchQuery: '',
       selectedFolder: null,
+      selectedFolderFilter: null,
       theme: 'dark',
       encryptionEnabled: false,
-      abacusApiKey: ''
+      abacusApiKey: '',
+      geminiApiKey: '',
+      groqApiKey: '',
+      groqSttModel: 'whisper-large-v3',
+      geminiModel: 'gemini-3.5-flash',
+      geminiProModel: 'gemini-2.5-flash-preview-05-20'
     };
     const listeners = {};
 
@@ -388,9 +421,17 @@
       const theme = await DB.getSetting('theme');
       const encryptionEnabled = await DB.getSetting('encryptionEnabled');
       const abacusApiKey = await DB.getSetting('abacusApiKey');
+      const geminiApiKey = await DB.getSetting('geminiApiKey');
+      const groqApiKey = await DB.getSetting('groqApiKey');
+      const groqSttModel = await DB.getSetting('groqSttModel');
+      const geminiModel = await DB.getSetting('geminiModel');
       if (theme) state.theme = theme;
       if (encryptionEnabled !== null) state.encryptionEnabled = !!encryptionEnabled;
       if (abacusApiKey) state.abacusApiKey = abacusApiKey;
+      if (geminiApiKey) state.geminiApiKey = geminiApiKey;
+      if (groqApiKey) state.groqApiKey = groqApiKey;
+      if (groqSttModel) state.groqSttModel = groqSttModel;
+      if (geminiModel) state.geminiModel = geminiModel;
       state.isLocked = !!pinHash;
       if (!pinHash) state.isLocked = false;
     }
@@ -487,6 +528,210 @@
     }
 
     return { toast, confirm, showLoading, hideLoading, safeDownload, createIcon, refreshIcons, formatDate, formatFileSize };
+  })();
+  </script>
+
+  <!-- ==== CONTEXT MENU & LONG PRESS ==== -->
+  <script>
+  /**
+   * ContextMenu - Long press context menu for memory cards
+   */
+  window.ContextMenu = (() => {
+    let activeMenuOverlay = null;
+    let longPressTimer = null;
+    let isMenuActiveFlag = false;
+    let selectionMode = false;
+    let selectedIds = new Set();
+    const LONG_PRESS_DURATION = 800;
+
+    function isActive() { return isMenuActiveFlag; }
+    function isSelectionMode() { return selectionMode; }
+    function getSelectedIds() { return selectedIds; }
+
+    function close() {
+      if (activeMenuOverlay) {
+        activeMenuOverlay.remove();
+        activeMenuOverlay = null;
+      }
+      isMenuActiveFlag = false;
+    }
+
+    function exitSelectionMode() {
+      selectionMode = false;
+      selectedIds.clear();
+      close();
+      const screen = AppState.get('currentScreen');
+      if (screen === 'home') HomeScreen.show();
+      else if (screen === 'allMemories') AllMemoriesScreen.show();
+      else if (screen === 'folderView') FolderListScreen.show();
+    }
+
+    function toggleSelection(id) {
+      if (selectedIds.has(id)) selectedIds.delete(id);
+      else selectedIds.add(id);
+      document.querySelectorAll('[data-memory-id]').forEach(card => {
+        const cid = parseInt(card.dataset.memoryId);
+        card.classList.toggle('selected-card', selectedIds.has(cid));
+      });
+    }
+
+    function showMenu(memoryId, x, y) {
+      close();
+      isMenuActiveFlag = true;
+
+      const overlay = document.createElement('div');
+      overlay.className = 'context-menu-overlay';
+      
+      const menu = document.createElement('div');
+      menu.className = 'context-menu';
+      const maxX = window.innerWidth - 180;
+      const maxY = window.innerHeight - 160;
+      menu.style.left = Math.min(x, maxX) + 'px';
+      menu.style.top = Math.min(y, maxY) + 'px';
+
+      menu.innerHTML = `
+        <div class="context-menu-item" data-action="edit">
+          <span>📝</span><span>수정하기</span>
+        </div>
+        <div class="context-menu-item" data-action="select">
+          <span>☑️</span><span>선택 모드</span>
+        </div>
+        <div class="context-menu-item danger" data-action="delete">
+          <span>🗑️</span><span>삭제하기</span>
+        </div>
+      `;
+
+      overlay.appendChild(menu);
+      document.body.appendChild(overlay);
+      activeMenuOverlay = overlay;
+
+      menu.querySelectorAll('.context-menu-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const action = item.dataset.action;
+          close();
+          if (action === 'edit') _editMemory(memoryId);
+          else if (action === 'select') _enterSelectionMode(memoryId);
+          else if (action === 'delete') _deleteMemory(memoryId);
+        });
+      });
+
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) close();
+      });
+    }
+
+    async function _editMemory(id) {
+      const m = await DB.getMemory(id);
+      if (!m) return;
+      if (m.type === 'text') App.navigate('addMemory', { type: 'text', id });
+      else if (m.type === 'image') App.navigate('addMemory', { type: 'image', id });
+      else if (m.type === 'document') App.navigate('addMemory', { type: 'document', id });
+      else if (m.type === 'voice') App.navigate('addMemory', { type: 'voice', id });
+    }
+
+    function _enterSelectionMode(memoryId) {
+      selectionMode = true;
+      selectedIds.clear();
+      selectedIds.add(memoryId);
+      const screen = AppState.get('currentScreen');
+      if (screen === 'home') HomeScreen.show();
+      else if (screen === 'allMemories') AllMemoriesScreen.show();
+    }
+
+    async function _deleteMemory(id) {
+      const m = await DB.getMemory(id);
+      if (!m) return;
+      UI.confirm('기억 삭제', `"${m.title || '제목 없음'}"을(를) 삭제하시겠습니까?`, async () => {
+        await DB.deleteMemory(id);
+        UI.toast('기억이 삭제되었습니다', 'success');
+        const screen = AppState.get('currentScreen');
+        if (screen === 'home') HomeScreen.show();
+        else if (screen === 'allMemories') AllMemoriesScreen.show();
+        else App.navigate('home');
+      }, '삭제');
+    }
+
+    async function deleteSelected() {
+      if (selectedIds.size === 0) return;
+      UI.confirm('선택 삭제', `${selectedIds.size}개의 기억을 삭제하시겠습니까?`, async () => {
+        for (const id of selectedIds) {
+          await DB.deleteMemory(id);
+        }
+        UI.toast(`${selectedIds.size}개의 기억이 삭제되었습니다`, 'success');
+        exitSelectionMode();
+      }, '삭제');
+    }
+
+    function bindLongPress(el, memoryId) {
+      let startX, startY;
+      el.addEventListener('pointerdown', (e) => {
+        startX = e.clientX; startY = e.clientY;
+        longPressTimer = setTimeout(() => {
+          if (navigator.vibrate) navigator.vibrate(50);
+          showMenu(memoryId, e.clientX, e.clientY);
+        }, LONG_PRESS_DURATION);
+      });
+      el.addEventListener('pointermove', (e) => {
+        if (longPressTimer && (Math.abs(e.clientX - startX) > 10 || Math.abs(e.clientY - startY) > 10)) {
+          clearTimeout(longPressTimer); longPressTimer = null;
+        }
+      });
+      el.addEventListener('pointerup', () => { clearTimeout(longPressTimer); longPressTimer = null; });
+      el.addEventListener('pointercancel', () => { clearTimeout(longPressTimer); longPressTimer = null; });
+      // Prevent default context menu on mobile
+      el.addEventListener('contextmenu', (e) => e.preventDefault());
+    }
+
+    return { isActive, isSelectionMode, getSelectedIds, close, showMenu, bindLongPress, toggleSelection, deleteSelected, exitSelectionMode };
+  })();
+  </script>
+
+  <!-- ==== NAVIGATION BAR ==== -->
+  <script>
+  /**
+   * NavBar - Global navigation bar with close/back/forward
+   */
+  window.NavBar = (() => {
+    function render(title) {
+      title = title || '';
+      const histLen = App.getHistoryLength ? App.getHistoryLength() : 0;
+      const canFwd = App.canGoForward ? App.canGoForward() : false;
+      return `
+        <div class="nav-bar">
+          <div style="display:flex;gap:4px;align-items:center">
+            <button onclick="App.goBack()" ${histLen <= 0 ? 'disabled' : ''} title="뒤로">
+              <i data-lucide="chevron-left" class="w-4 h-4"></i>
+              <span>뒤로</span>
+            </button>
+            <button onclick="App.goForward()" ${!canFwd ? 'disabled' : ''} title="앞으로">
+              <i data-lucide="chevron-right" class="w-4 h-4"></i>
+              <span>앞으로</span>
+            </button>
+          </div>
+          <span style="font-size:13px;font-weight:600;color:#e2e8f0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_escapeHtml(title)}</span>
+          <button onclick="NavBar.closeAction()" title="닫기" style="color:#f87171">
+            <i data-lucide="x" class="w-4 h-4"></i>
+            <span>닫기</span>
+          </button>
+        </div>
+      `;
+    }
+    function closeAction() {
+      if (typeof ContextMenu !== 'undefined' && ContextMenu.isSelectionMode()) {
+        ContextMenu.exitSelectionMode();
+        return;
+      }
+      const screen = AppState.get('currentScreen');
+      if (screen === 'home') {
+        AppState.set('isLocked', true);
+        AppState.set('pin', null);
+        LockScreen.show();
+      } else {
+        App.navigate('home');
+      }
+    }
+    return { render, closeAction };
   })();
   </script>
 
@@ -666,18 +911,30 @@
    */
   window.HomeScreen = (() => {
     let searchTimeout = null;
+    let _folderMap = {};
+
+    async function _loadFolderMap() {
+      const folders = await DB.getAllFolders();
+      _folderMap = {};
+      folders.forEach(f => { _folderMap[f.id] = f; });
+    }
+
+    function getFolderMap() { return _folderMap; }
 
     async function show() {
       AppState.set('currentScreen', 'home');
       AppState.set('currentTab', 'home');
+      await _loadFolderMap();
       const memoryCount = await DB.getMemoryCount();
       const folderCount = await DB.getFolderCount();
       const memories = await DB.getAllMemories();
       const recent = memories.slice(0, 10);
+      const inSelection = ContextMenu.isSelectionMode();
 
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="pb-24 fade-in">
+        ${NavBar.render('Memory Vault')}
+        <div class="pb-24 nav-content-offset fade-in">
           <!-- Header -->
           <div class="p-4 flex items-center justify-between">
             <div>
@@ -714,6 +971,7 @@
           </div>
 
           <!-- Quick Add -->
+          ${!inSelection ? `
           <div class="px-4 mb-4">
             <h3 class="text-sm font-semibold text-slate-400 mb-2">빠른 추가</h3>
             <div class="grid grid-cols-4 gap-2">
@@ -735,6 +993,15 @@
               </button>
             </div>
           </div>
+          ` : `
+          <div class="px-4 mb-4 flex items-center justify-between">
+            <span class="text-sm text-indigo-400 font-semibold">선택 모드 (${ContextMenu.getSelectedIds().size}개 선택)</span>
+            <div class="flex gap-2">
+              <button onclick="ContextMenu.deleteSelected()" class="btn btn-danger text-xs">선택 삭제</button>
+              <button onclick="ContextMenu.exitSelectionMode()" class="btn btn-secondary text-xs">취소</button>
+            </div>
+          </div>
+          `}
 
           <!-- Recent Memories -->
           <div class="px-4">
@@ -755,23 +1022,28 @@
       `;
       UI.refreshIcons();
       _bindSearch();
+      _bindLongPress();
     }
 
     function _renderMemoryCard(m) {
       const typeIcons = { text: 'file-text', image: 'image', document: 'file', voice: 'mic' };
       const typeColors = { text: 'text-blue-400', image: 'text-green-400', document: 'text-orange-400', voice: 'text-red-400' };
       const priorityClass = m.priority === 'high' ? 'priority-high' : m.priority === 'medium' ? 'priority-medium' : 'priority-low';
+      const isSelected = ContextMenu.getSelectedIds().has(m.id);
+      const folder = m.folderId ? _folderMap[m.folderId] : null;
+      const folderBadgeHtml = folder ? `<span class="folder-badge">📁 ${_escapeHtml(folder.name)}</span>` : '';
       return `
-        <div class="card mb-2 cursor-pointer" onclick="App.navigate('viewMemory', {id:${m.id}})">
+        <div class="card mb-2 cursor-pointer ${isSelected ? 'selected-card' : ''}" data-memory-id="${m.id}">
           <div class="flex items-start gap-3">
             <i data-lucide="${typeIcons[m.type] || 'file'}" class="w-5 h-5 mt-0.5 ${typeColors[m.type] || ''}"></i>
             <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2 mb-1">
+              <div class="flex items-center gap-2 mb-1 flex-wrap">
                 <span class="font-medium text-sm truncate">${_escapeHtml(m.title || '제목 없음')}</span>
                 ${m.priority ? `<span class="priority-badge ${priorityClass}">${m.priority === 'high' ? '높음' : m.priority === 'medium' ? '보통' : '낮음'}</span>` : ''}
+                ${folderBadgeHtml}
               </div>
               <p class="text-xs text-slate-400 truncate">${_escapeHtml((m.content || '').substring(0, 80))}</p>
-              <div class="flex items-center gap-2 mt-1">
+              <div class="flex items-center gap-2 mt-1 flex-wrap">
                 <span class="text-xs text-slate-500">${UI.formatDate(m.createdAt)}</span>
                 ${m.tags && m.tags.length ? m.tags.slice(0, 3).map(t => `<span class="tag">${_escapeHtml(t)}</span>`).join('') : ''}
               </div>
@@ -779,6 +1051,21 @@
           </div>
         </div>
       `;
+    }
+
+    function _bindLongPress() {
+      document.querySelectorAll('[data-memory-id]').forEach(card => {
+        const id = parseInt(card.dataset.memoryId);
+        ContextMenu.bindLongPress(card, id);
+        card.addEventListener('click', (e) => {
+          // If context menu is active, do nothing
+          if (ContextMenu.isActive()) { e.preventDefault(); e.stopPropagation(); return; }
+          // If in selection mode, toggle selection
+          if (ContextMenu.isSelectionMode()) { ContextMenu.toggleSelection(id); return; }
+          // Normal click - navigate to view
+          App.navigate('viewMemory', { id });
+        });
+      });
     }
 
     function _bindSearch() {
@@ -799,12 +1086,13 @@
               </div>
             `;
             UI.refreshIcons();
+            _bindLongPress();
           }
         }, 300);
       });
     }
 
-    return { show, _renderMemoryCard };
+    return { show, _renderMemoryCard, getFolderMap, _loadFolderMap };
   })();
 
   function _escapeHtml(text) {
@@ -847,13 +1135,8 @@
 
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="p-4 pb-24 fade-in">
-          <div class="flex items-center gap-3 mb-6">
-            <button onclick="App.goBack()" class="p-2 rounded-lg hover:bg-slate-800">
-              <i data-lucide="arrow-left" class="w-5 h-5"></i>
-            </button>
-            <h2 class="text-lg font-bold">${editing ? '텍스트 수정' : '텍스트 기억 추가'}</h2>
-          </div>
+        ${NavBar.render(editing ? '텍스트 수정' : '텍스트 기억 추가')}
+        <div class="p-4 pb-24 nav-content-offset fade-in">
           <div class="space-y-4">
             <div>
               <label class="text-sm text-slate-400 mb-1 block">제목 *</label>
@@ -958,63 +1241,91 @@
    * ImageForm - Image memory with drag-and-drop, Base64 storage
    */
   window.ImageForm = (() => {
-    let imageData = null;
+    let imageDataList = []; // Support multiple images
+    let editId = null;
 
     async function show(params = {}) {
       AppState.set('currentScreen', 'addMemory');
-      imageData = null;
+      editId = params.id || null;
+      imageDataList = [];
+      const editing = editId ? await DB.getMemory(editId) : null;
       const folders = await DB.getAllFolders();
+
+      // Load existing images if editing
+      if (editing && editing.imageData) {
+        if (Array.isArray(editing.imageData)) imageDataList = [...editing.imageData];
+        else imageDataList = [editing.imageData];
+      }
 
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="p-4 pb-24 fade-in">
-          <div class="flex items-center gap-3 mb-6">
-            <button onclick="App.goBack()" class="p-2 rounded-lg hover:bg-slate-800">
-              <i data-lucide="arrow-left" class="w-5 h-5"></i>
-            </button>
-            <h2 class="text-lg font-bold">이미지 기억 추가</h2>
-          </div>
+        ${NavBar.render(editing ? '이미지 수정' : '이미지 기억 추가')}
+        <div class="p-4 pb-24 nav-content-offset fade-in">
           <div class="space-y-4">
             <div>
               <label class="text-sm text-slate-400 mb-1 block">제목 *</label>
-              <input type="text" id="mem-title" placeholder="이미지 제목"/>
+              <input type="text" id="mem-title" placeholder="이미지 제목" value="${_escapeHtml(editing?.title || '')}"/>
             </div>
+            <div id="images-preview-list"></div>
             <div id="drop-zone" class="drag-zone">
               <i data-lucide="image-plus" class="w-12 h-12 mx-auto mb-3 text-slate-500"></i>
               <p class="text-slate-400">이미지를 드래그하거나 클릭하여 업로드</p>
-              <p class="text-slate-500 text-xs mt-1">JPG, PNG, GIF, WebP (최대 10MB)</p>
-              <input type="file" id="file-input" accept="image/*" class="hidden"/>
-            </div>
-            <div id="preview-area" class="hidden">
-              <img id="preview-img" class="w-full rounded-lg max-h-64 object-contain bg-slate-900"/>
-              <button id="btn-remove-img" class="text-red-400 text-sm mt-2">이미지 제거</button>
+              <p class="text-slate-500 text-xs mt-1">JPG, PNG, GIF, WebP (최대 10MB) · 여러 장 추가 가능</p>
+              <input type="file" id="file-input" accept="image/*" multiple class="hidden"/>
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">설명</label>
-              <textarea id="mem-content" rows="3" placeholder="이미지에 대한 설명..."></textarea>
+              <textarea id="mem-content" rows="3" placeholder="이미지에 대한 설명...">${_escapeHtml(editing?.content || '')}</textarea>
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">폴더</label>
               <select id="mem-folder">
                 <option value="">폴더 없음</option>
-                ${folders.map(f => `<option value="${f.id}">${_escapeHtml(f.name)}</option>`).join('')}
+                ${folders.map(f => `<option value="${f.id}" ${editing?.folderId === f.id ? 'selected' : ''}>${_escapeHtml(f.name)}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="text-sm text-slate-400 mb-1 block">우선순위</label>
+              <select id="mem-priority">
+                <option value="low" ${editing?.priority === 'low' ? 'selected' : ''}>낮음</option>
+                <option value="medium" ${(!editing || editing?.priority === 'medium') ? 'selected' : ''}>보통</option>
+                <option value="high" ${editing?.priority === 'high' ? 'selected' : ''}>높음</option>
               </select>
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">태그 (쉼표로 구분)</label>
-              <input type="text" id="mem-tags" placeholder="태그1, 태그2"/>
+              <input type="text" id="mem-tags" placeholder="태그1, 태그2" value="${editing?.tags ? editing.tags.join(', ') : ''}"/>
             </div>
             <div class="flex gap-3">
               <button id="btn-ai-desc" class="btn btn-secondary flex-1 flex items-center justify-center gap-2">
                 <i data-lucide="sparkles" class="w-4 h-4"></i> AI 분석
               </button>
-              <button id="btn-save" class="btn btn-primary flex-1">저장</button>
+              <button id="btn-save" class="btn btn-primary flex-1">${editing ? '수정' : '저장'}</button>
             </div>
           </div>
         </div>
       `;
       UI.refreshIcons();
+      _renderImagesList();
       _bindEvents();
+    }
+
+    function _renderImagesList() {
+      const container = document.getElementById('images-preview-list');
+      if (!container) return;
+      if (imageDataList.length === 0) { container.innerHTML = ''; return; }
+      container.innerHTML = imageDataList.map((img, i) => `
+        <div class="file-list-item">
+          <img src="${img}" style="width:48px;height:48px;object-fit:cover;border-radius:8px"/>
+          <span class="flex-1 text-sm text-slate-300">이미지 ${i + 1}</span>
+          <span class="remove-file" onclick="ImageForm.removeImage(${i})">✕</span>
+        </div>
+      `).join('');
+    }
+
+    function removeImage(index) {
+      imageDataList.splice(index, 1);
+      _renderImagesList();
     }
 
     function _bindEvents() {
@@ -1024,9 +1335,14 @@
       dropZone.addEventListener('click', () => fileInput.click());
       dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
       dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-      dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); if (e.dataTransfer.files[0]) _handleFile(e.dataTransfer.files[0]); });
-      fileInput.addEventListener('change', (e) => { if (e.target.files[0]) _handleFile(e.target.files[0]); });
-      document.getElementById('btn-remove-img').addEventListener('click', _removeImage);
+      dropZone.addEventListener('drop', (e) => {
+        e.preventDefault(); dropZone.classList.remove('dragover');
+        Array.from(e.dataTransfer.files).forEach(f => _handleFile(f));
+      });
+      fileInput.addEventListener('change', (e) => {
+        Array.from(e.target.files).forEach(f => _handleFile(f));
+        e.target.value = '';
+      });
       document.getElementById('btn-save').addEventListener('click', _save);
       document.getElementById('btn-ai-desc').addEventListener('click', _aiAnalyze);
     }
@@ -1036,10 +1352,8 @@
       if (!file.type.startsWith('image/')) { UI.toast('이미지 파일만 업로드 가능합니다', 'error'); return; }
       const reader = new FileReader();
       reader.onload = (e) => {
-        imageData = e.target.result;
-        document.getElementById('preview-img').src = imageData;
-        document.getElementById('preview-area').classList.remove('hidden');
-        document.getElementById('drop-zone').classList.add('hidden');
+        imageDataList.push(e.target.result);
+        _renderImagesList();
         if (!document.getElementById('mem-title').value) {
           document.getElementById('mem-title').value = file.name.replace(/\.[^/.]+$/, '');
         }
@@ -1047,23 +1361,26 @@
       reader.readAsDataURL(file);
     }
 
-    function _removeImage() {
-      imageData = null;
-      document.getElementById('preview-area').classList.add('hidden');
-      document.getElementById('drop-zone').classList.remove('hidden');
-    }
-
     async function _save() {
       const title = document.getElementById('mem-title').value.trim();
       if (!title) { UI.toast('제목을 입력하세요', 'error'); return; }
-      if (!imageData) { UI.toast('이미지를 선택하세요', 'error'); return; }
+      if (imageDataList.length === 0) { UI.toast('이미지를 선택하세요', 'error'); return; }
       const content = document.getElementById('mem-content').value.trim();
       const folderId = document.getElementById('mem-folder').value ? parseInt(document.getElementById('mem-folder').value) : null;
+      const priority = document.getElementById('mem-priority').value;
       const tags = document.getElementById('mem-tags').value.split(',').map(t => t.trim()).filter(Boolean);
 
+      // Store as array if multiple, single value if one (backward compat)
+      const imgStore = imageDataList.length === 1 ? imageDataList[0] : [...imageDataList];
+
       try {
-        await DB.addMemory({ title, content, type: 'image', imageData, folderId, priority: 'medium', tags, encrypted: false });
-        UI.toast('이미지가 저장되었습니다', 'success');
+        if (editId) {
+          await DB.updateMemory(editId, { title, content, imageData: imgStore, folderId, priority, tags });
+          UI.toast('이미지가 수정되었습니다', 'success');
+        } else {
+          await DB.addMemory({ title, content, type: 'image', imageData: imgStore, folderId, priority, tags, encrypted: false });
+          UI.toast('이미지가 저장되었습니다', 'success');
+        }
         App.navigate('home');
       } catch (e) {
         UI.toast('저장 실패: ' + e.message, 'error');
@@ -1071,10 +1388,11 @@
     }
 
     async function _aiAnalyze() {
-      if (!imageData) { UI.toast('먼저 이미지를 업로드하세요', 'info'); return; }
+      const img = imageDataList[0];
+      if (!img) { UI.toast('먼저 이미지를 업로드하세요', 'info'); return; }
       try {
         UI.showLoading('AI가 이미지를 분석 중...');
-        const result = await AbacusAI.analyzeImage(imageData);
+        const result = await AbacusAI.analyzeImage(img);
         UI.hideLoading();
         if (result) {
           document.getElementById('mem-content').value = result;
@@ -1086,7 +1404,7 @@
       }
     }
 
-    return { show };
+    return { show, removeImage };
   })();
   </script>
 
@@ -1096,66 +1414,89 @@
    * DocumentForm - PDF/DOCX up to 20MB, stored as Base64
    */
   window.DocumentForm = (() => {
-    let docData = null;
-    let docName = '';
+    let docList = []; // [{data, name}]
+    let editId = null;
 
     async function show(params = {}) {
       AppState.set('currentScreen', 'addMemory');
-      docData = null;
-      docName = '';
+      editId = params.id || null;
+      docList = [];
+      const editing = editId ? await DB.getMemory(editId) : null;
       const folders = await DB.getAllFolders();
+
+      // Load existing docs if editing
+      if (editing) {
+        if (editing.docDataList && Array.isArray(editing.docDataList)) {
+          docList = [...editing.docDataList];
+        } else if (editing.docData) {
+          docList = [{ data: editing.docData, name: editing.docName || '문서' }];
+        }
+      }
 
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="p-4 pb-24 fade-in">
-          <div class="flex items-center gap-3 mb-6">
-            <button onclick="App.goBack()" class="p-2 rounded-lg hover:bg-slate-800">
-              <i data-lucide="arrow-left" class="w-5 h-5"></i>
-            </button>
-            <h2 class="text-lg font-bold">문서 기억 추가</h2>
-          </div>
+        ${NavBar.render(editing ? '문서 수정' : '문서 기억 추가')}
+        <div class="p-4 pb-24 nav-content-offset fade-in">
           <div class="space-y-4">
             <div>
               <label class="text-sm text-slate-400 mb-1 block">제목 *</label>
-              <input type="text" id="mem-title" placeholder="문서 제목"/>
+              <input type="text" id="mem-title" placeholder="문서 제목" value="${_escapeHtml(editing?.title || '')}"/>
             </div>
+            <div id="doc-list-area"></div>
             <div id="drop-zone" class="drag-zone">
               <i data-lucide="file-up" class="w-12 h-12 mx-auto mb-3 text-slate-500"></i>
               <p class="text-slate-400">문서를 드래그하거나 클릭하여 업로드</p>
-              <p class="text-slate-500 text-xs mt-1">PDF, DOCX (최대 20MB)</p>
-              <input type="file" id="file-input" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="hidden"/>
-            </div>
-            <div id="doc-info" class="hidden card">
-              <div class="flex items-center gap-3">
-                <i data-lucide="file" class="w-8 h-8 text-orange-400"></i>
-                <div class="flex-1">
-                  <p id="doc-name" class="text-sm font-medium truncate"></p>
-                  <p id="doc-size" class="text-xs text-slate-400"></p>
-                </div>
-                <button id="btn-remove-doc" class="text-red-400 text-sm">제거</button>
-              </div>
+              <p class="text-slate-500 text-xs mt-1">PDF, DOCX (최대 20MB) · 여러 파일 추가 가능</p>
+              <input type="file" id="file-input" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple class="hidden"/>
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">메모</label>
-              <textarea id="mem-content" rows="3" placeholder="문서에 대한 메모..."></textarea>
+              <textarea id="mem-content" rows="3" placeholder="문서에 대한 메모...">${_escapeHtml(editing?.content || '')}</textarea>
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">폴더</label>
               <select id="mem-folder">
                 <option value="">폴더 없음</option>
-                ${folders.map(f => `<option value="${f.id}">${_escapeHtml(f.name)}</option>`).join('')}
+                ${folders.map(f => `<option value="${f.id}" ${editing?.folderId === f.id ? 'selected' : ''}>${_escapeHtml(f.name)}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="text-sm text-slate-400 mb-1 block">우선순위</label>
+              <select id="mem-priority">
+                <option value="low" ${editing?.priority === 'low' ? 'selected' : ''}>낮음</option>
+                <option value="medium" ${(!editing || editing?.priority === 'medium') ? 'selected' : ''}>보통</option>
+                <option value="high" ${editing?.priority === 'high' ? 'selected' : ''}>높음</option>
               </select>
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">태그 (쉼표로 구분)</label>
-              <input type="text" id="mem-tags" placeholder="태그1, 태그2"/>
+              <input type="text" id="mem-tags" placeholder="태그1, 태그2" value="${editing?.tags ? editing.tags.join(', ') : ''}"/>
             </div>
-            <button id="btn-save" class="btn btn-primary w-full">저장</button>
+            <button id="btn-save" class="btn btn-primary w-full">${editing ? '수정' : '저장'}</button>
           </div>
         </div>
       `;
       UI.refreshIcons();
+      _renderDocList();
       _bindEvents();
+    }
+
+    function _renderDocList() {
+      const container = document.getElementById('doc-list-area');
+      if (!container) return;
+      if (docList.length === 0) { container.innerHTML = ''; return; }
+      container.innerHTML = docList.map((doc, i) => `
+        <div class="file-list-item">
+          <span style="font-size:20px">📄</span>
+          <span class="flex-1 text-sm text-slate-300 truncate">${_escapeHtml(doc.name)}</span>
+          <span class="remove-file" onclick="DocumentForm.removeDoc(${i})">✕</span>
+        </div>
+      `).join('');
+    }
+
+    function removeDoc(index) {
+      docList.splice(index, 1);
+      _renderDocList();
     }
 
     function _bindEvents() {
@@ -1164,9 +1505,14 @@
       dropZone.addEventListener('click', () => fileInput.click());
       dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
       dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-      dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); if (e.dataTransfer.files[0]) _handleFile(e.dataTransfer.files[0]); });
-      fileInput.addEventListener('change', (e) => { if (e.target.files[0]) _handleFile(e.target.files[0]); });
-      document.getElementById('btn-remove-doc').addEventListener('click', _removeDoc);
+      dropZone.addEventListener('drop', (e) => {
+        e.preventDefault(); dropZone.classList.remove('dragover');
+        Array.from(e.dataTransfer.files).forEach(f => _handleFile(f));
+      });
+      fileInput.addEventListener('change', (e) => {
+        Array.from(e.target.files).forEach(f => _handleFile(f));
+        e.target.value = '';
+      });
       document.getElementById('btn-save').addEventListener('click', _save);
     }
 
@@ -1178,45 +1524,51 @@
       }
       const reader = new FileReader();
       reader.onload = (e) => {
-        docData = e.target.result;
-        docName = file.name;
-        document.getElementById('doc-name').textContent = file.name;
-        document.getElementById('doc-size').textContent = UI.formatFileSize(file.size);
-        document.getElementById('doc-info').classList.remove('hidden');
-        document.getElementById('drop-zone').classList.add('hidden');
+        docList.push({ data: e.target.result, name: file.name });
+        _renderDocList();
         if (!document.getElementById('mem-title').value) {
           document.getElementById('mem-title').value = file.name.replace(/\.[^/.]+$/, '');
         }
-        UI.refreshIcons();
       };
       reader.readAsDataURL(file);
-    }
-
-    function _removeDoc() {
-      docData = null;
-      docName = '';
-      document.getElementById('doc-info').classList.add('hidden');
-      document.getElementById('drop-zone').classList.remove('hidden');
     }
 
     async function _save() {
       const title = document.getElementById('mem-title').value.trim();
       if (!title) { UI.toast('제목을 입력하세요', 'error'); return; }
-      if (!docData) { UI.toast('문서를 선택하세요', 'error'); return; }
+      if (docList.length === 0) { UI.toast('문서를 선택하세요', 'error'); return; }
       const content = document.getElementById('mem-content').value.trim();
       const folderId = document.getElementById('mem-folder').value ? parseInt(document.getElementById('mem-folder').value) : null;
+      const priority = document.getElementById('mem-priority').value;
       const tags = document.getElementById('mem-tags').value.split(',').map(t => t.trim()).filter(Boolean);
 
+      // Backward compat: single doc uses docData/docName, multi uses docDataList
+      const memData = { title, content, type: 'document', folderId, priority, tags, encrypted: false };
+      if (docList.length === 1) {
+        memData.docData = docList[0].data;
+        memData.docName = docList[0].name;
+        memData.docDataList = docList;
+      } else {
+        memData.docData = docList[0].data;
+        memData.docName = docList[0].name;
+        memData.docDataList = [...docList];
+      }
+
       try {
-        await DB.addMemory({ title, content, type: 'document', docData, docName, folderId, priority: 'medium', tags, encrypted: false });
-        UI.toast('문서가 저장되었습니다', 'success');
+        if (editId) {
+          await DB.updateMemory(editId, memData);
+          UI.toast('문서가 수정되었습니다', 'success');
+        } else {
+          await DB.addMemory(memData);
+          UI.toast('문서가 저장되었습니다', 'success');
+        }
         App.navigate('home');
       } catch (e) {
         UI.toast('저장 실패: ' + e.message, 'error');
       }
     }
 
-    return { show };
+    return { show, removeDoc };
   })();
   </script>
 
@@ -1229,33 +1581,40 @@
     let mediaRecorder = null;
     let audioChunks = [];
     let audioBlob = null;
+    let audioDataList = []; // Support multiple audio files
     let isRecording = false;
     let recognition = null;
     let transcript = '';
     let animationId = null;
     let analyser = null;
+    let editId = null;
 
     async function show(params = {}) {
       AppState.set('currentScreen', 'addMemory');
+      editId = params.id || null;
       audioBlob = null;
+      audioDataList = [];
       transcript = '';
       isRecording = false;
+      const editing = editId ? await DB.getMemory(editId) : null;
       const folders = await DB.getAllFolders();
+
+      // Load existing audio if editing
+      if (editing && editing.audioData) {
+        if (Array.isArray(editing.audioData)) audioDataList = [...editing.audioData];
+        else audioDataList = [editing.audioData];
+      }
 
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="p-4 pb-24 fade-in">
-          <div class="flex items-center gap-3 mb-6">
-            <button onclick="App.goBack()" class="p-2 rounded-lg hover:bg-slate-800">
-              <i data-lucide="arrow-left" class="w-5 h-5"></i>
-            </button>
-            <h2 class="text-lg font-bold">음성 기억 추가</h2>
-          </div>
+        ${NavBar.render(editing ? '음성 수정' : '음성 기억 추가')}
+        <div class="p-4 pb-24 nav-content-offset fade-in">
           <div class="space-y-4">
             <div>
               <label class="text-sm text-slate-400 mb-1 block">제목 *</label>
-              <input type="text" id="mem-title" placeholder="음성 메모 제목"/>
+              <input type="text" id="mem-title" placeholder="음성 메모 제목" value="${_escapeHtml(editing?.title || '')}"/>
             </div>
+            <div id="audio-list-area"></div>
             <div class="card text-center py-8">
               <div id="visualizer" class="voice-visualizer mb-4">
                 ${Array(20).fill(0).map(() => '<div class="voice-bar" style="height:4px"></div>').join('')}
@@ -1272,26 +1631,53 @@
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">음성 인식 텍스트</label>
-              <textarea id="mem-transcript" rows="4" placeholder="음성 인식된 텍스트가 여기에 표시됩니다..."></textarea>
+              <textarea id="mem-transcript" rows="4" placeholder="음성 인식된 텍스트가 여기에 표시됩니다...">${_escapeHtml(editing?.content || '')}</textarea>
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">폴더</label>
               <select id="mem-folder">
                 <option value="">폴더 없음</option>
-                ${folders.map(f => `<option value="${f.id}">${_escapeHtml(f.name)}</option>`).join('')}
+                ${folders.map(f => `<option value="${f.id}" ${editing?.folderId === f.id ? 'selected' : ''}>${_escapeHtml(f.name)}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="text-sm text-slate-400 mb-1 block">우선순위</label>
+              <select id="mem-priority">
+                <option value="low" ${editing?.priority === 'low' ? 'selected' : ''}>낮음</option>
+                <option value="medium" ${(!editing || editing?.priority === 'medium') ? 'selected' : ''}>보통</option>
+                <option value="high" ${editing?.priority === 'high' ? 'selected' : ''}>높음</option>
               </select>
             </div>
             <div>
               <label class="text-sm text-slate-400 mb-1 block">태그 (쉼표로 구분)</label>
-              <input type="text" id="mem-tags" placeholder="태그1, 태그2"/>
+              <input type="text" id="mem-tags" placeholder="태그1, 태그2" value="${editing?.tags ? editing.tags.join(', ') : ''}"/>
             </div>
-            <button id="btn-save" class="btn btn-primary w-full">저장</button>
+            <button id="btn-save" class="btn btn-primary w-full">${editing ? '수정' : '저장'}</button>
           </div>
         </div>
       `;
       UI.refreshIcons();
+      _renderAudioList();
       document.getElementById('btn-rec').addEventListener('click', _toggleRecording);
       document.getElementById('btn-save').addEventListener('click', _save);
+    }
+
+    function _renderAudioList() {
+      const container = document.getElementById('audio-list-area');
+      if (!container) return;
+      if (audioDataList.length === 0) { container.innerHTML = ''; return; }
+      container.innerHTML = audioDataList.map((aud, i) => `
+        <div class="file-list-item">
+          <span style="font-size:20px">🎤</span>
+          <audio src="${aud}" controls style="flex:1;height:32px"></audio>
+          <span class="remove-file" onclick="VoiceForm.removeAudio(${i})">✕</span>
+        </div>
+      `).join('');
+    }
+
+    function removeAudio(index) {
+      audioDataList.splice(index, 1);
+      _renderAudioList();
     }
 
     async function _toggleRecording() {
@@ -1319,6 +1705,13 @@
           const url = URL.createObjectURL(audioBlob);
           document.getElementById('audio-el').src = url;
           document.getElementById('audio-player').classList.remove('hidden');
+          // Also convert to data URL and add to list
+          const reader = new FileReader();
+          reader.onload = () => {
+            audioDataList.push(reader.result);
+            _renderAudioList();
+          };
+          reader.readAsDataURL(audioBlob);
           stream.getTracks().forEach(t => t.stop());
         };
         mediaRecorder.start();
@@ -1384,27 +1777,27 @@
       if (!title) { UI.toast('제목을 입력하세요', 'error'); return; }
       const transcriptText = document.getElementById('mem-transcript').value.trim();
       const folderId = document.getElementById('mem-folder').value ? parseInt(document.getElementById('mem-folder').value) : null;
+      const priority = document.getElementById('mem-priority').value;
       const tags = document.getElementById('mem-tags').value.split(',').map(t => t.trim()).filter(Boolean);
 
-      let audioData = null;
-      if (audioBlob) {
-        audioData = await new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.readAsDataURL(audioBlob);
-        });
-      }
+      // Store as single or array
+      const audioStore = audioDataList.length === 1 ? audioDataList[0] : (audioDataList.length > 0 ? [...audioDataList] : null);
 
       try {
-        await DB.addMemory({ title, content: transcriptText, type: 'voice', audioData, folderId, priority: 'medium', tags, encrypted: false });
-        UI.toast('음성이 저장되었습니다', 'success');
+        if (editId) {
+          await DB.updateMemory(editId, { title, content: transcriptText, audioData: audioStore, folderId, priority, tags });
+          UI.toast('음성이 수정되었습니다', 'success');
+        } else {
+          await DB.addMemory({ title, content: transcriptText, type: 'voice', audioData: audioStore, folderId, priority, tags, encrypted: false });
+          UI.toast('음성이 저장되었습니다', 'success');
+        }
         App.navigate('home');
       } catch (e) {
         UI.toast('저장 실패: ' + e.message, 'error');
       }
     }
 
-    return { show };
+    return { show, removeAudio };
   })();
   </script>
 
@@ -1414,10 +1807,16 @@
    * AbacusAI - LLM and Vision API service (only allowed fetch exception)
    */
   window.AbacusAI = (() => {
+    // Gemini API 호출
     async function callLLM(prompt, systemPrompt = '') {
+      // Try Gemini first, then Abacus
+      const geminiKey = AppState.get('geminiApiKey');
+      if (geminiKey) {
+        return _callGemini(prompt, systemPrompt, geminiKey);
+      }
       const apiKey = AppState.get('abacusApiKey');
       if (!apiKey) {
-        UI.toast('설정에서 Abacus AI API 키를 입력하세요', 'info');
+        UI.toast('설정에서 Gemini 또는 Abacus AI API 키를 입력하세요', 'info');
         return null;
       }
       try {
@@ -1438,10 +1837,34 @@
       }
     }
 
+    async function _callGemini(prompt, systemPrompt, apiKey) {
+      const model = AppState.get('geminiModel') || 'gemini-3.5-flash';
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const body = {
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
+        generationConfig: { maxOutputTokens: 500 }
+      };
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await response.json();
+      if (data.candidates && data.candidates[0]) {
+        return data.candidates[0].content?.parts?.[0]?.text || '';
+      }
+      throw new Error(data.error?.message || 'Gemini API error');
+    }
+
     async function analyzeImage(base64Image) {
+      const geminiKey = AppState.get('geminiApiKey');
+      if (geminiKey) {
+        return _analyzeImageGemini(base64Image, geminiKey);
+      }
       const apiKey = AppState.get('abacusApiKey');
       if (!apiKey) {
-        UI.toast('설정에서 Abacus AI API 키를 입력하세요', 'info');
+        UI.toast('설정에서 Gemini API 키를 입력하세요', 'info');
         return null;
       }
       try {
@@ -1462,7 +1885,58 @@
       }
     }
 
-    return { callLLM, analyzeImage };
+    async function _analyzeImageGemini(base64Image, apiKey) {
+      const model = AppState.get('geminiProModel') || 'gemini-2.5-flash-preview-05-20';
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      // Extract mime and base64 data
+      const match = base64Image.match(/^data:(.*?);base64,(.*)$/);
+      const mimeType = match ? match[1] : 'image/jpeg';
+      const imageB64 = match ? match[2] : base64Image;
+      const body = {
+        contents: [{
+          parts: [
+            { text: '이 이미지를 한국어로 상세히 설명해주세요.' },
+            { inlineData: { mimeType, data: imageB64 } }
+          ]
+        }],
+        generationConfig: { maxOutputTokens: 500 }
+      };
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await response.json();
+      if (data.candidates && data.candidates[0]) {
+        return data.candidates[0].content?.parts?.[0]?.text || '';
+      }
+      throw new Error(data.error?.message || 'Gemini Vision API error');
+    }
+
+    // Groq Whisper STT - 한국어 음성 인식
+    async function transcribeAudio(audioBlob) {
+      const groqKey = AppState.get('groqApiKey');
+      if (!groqKey) {
+        UI.toast('설정에서 Groq API 키를 입력하세요', 'info');
+        return null;
+      }
+      const model = AppState.get('groqSttModel') || 'whisper-large-v3';
+      const formData = new FormData();
+      formData.append('file', audioBlob, 'audio.webm');
+      formData.append('model', model);
+      formData.append('language', 'ko');
+      formData.append('response_format', 'json');
+
+      const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${groqKey}` },
+        body: formData
+      });
+      const data = await response.json();
+      return data.text || '';
+    }
+
+    return { callLLM, analyzeImage, transcribeAudio };
   })();
   </script>
 
@@ -1473,24 +1947,73 @@
    */
   window.AllMemoriesScreen = (() => {
     let filter = 'all';
+    let folderFilter = null; // null = all, 0 = no folder, folderId number = specific folder
+    let _folderFilterName = '';
 
-    async function show() {
+    async function show(params = {}) {
       AppState.set('currentScreen', 'allMemories');
       AppState.set('currentTab', 'allMemories');
-      filter = 'all';
+      if (!ContextMenu.isSelectionMode()) filter = 'all';
+      // Support params.folderId for direct navigation from FolderListScreen
+      if (params && params.folderId !== undefined) {
+        folderFilter = params.folderId;
+        _folderFilterName = params.folderName || '';
+      } else if (!ContextMenu.isSelectionMode()) {
+        folderFilter = null;
+        _folderFilterName = '';
+      }
+      await HomeScreen._loadFolderMap();
       await _render();
     }
 
     async function _render() {
+      // Load all memories first, then filter client-side
       let memories;
       if (filter === 'all') memories = await DB.getAllMemories();
       else memories = await DB.getMemoriesByType(filter);
 
+      // Apply folder filter
+      if (folderFilter === 0) {
+        // "폴더 없음" - no folder assigned
+        memories = memories.filter(m => !m.folderId);
+      } else if (folderFilter && folderFilter !== null) {
+        memories = memories.filter(m => m.folderId === folderFilter);
+      }
+
+      const inSelection = ContextMenu.isSelectionMode();
+      const folders = await DB.getAllFolders();
+      const folderMap = HomeScreen.getFolderMap();
+
+      // Build title
+      let screenTitle = '전체 기억';
+      if (folderFilter === 0) screenTitle = '📂 폴더 없음';
+      else if (folderFilter && folderMap[folderFilter]) screenTitle = '📁 ' + folderMap[folderFilter].name;
+
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="pb-24 fade-in">
+        ${NavBar.render(screenTitle)}
+        <div class="pb-24 nav-content-offset fade-in">
           <div class="p-4">
-            <h2 class="text-lg font-bold mb-4">전체 기억</h2>
+            ${inSelection ? `
+              <div class="flex items-center justify-between mb-4">
+                <span class="text-sm text-indigo-400 font-semibold">선택 모드 (${ContextMenu.getSelectedIds().size}개 선택)</span>
+                <div class="flex gap-2">
+                  <button onclick="ContextMenu.deleteSelected()" class="btn btn-danger text-xs">선택 삭제</button>
+                  <button onclick="ContextMenu.exitSelectionMode()" class="btn btn-secondary text-xs">취소</button>
+                </div>
+              </div>
+            ` : `<h2 class="text-lg font-bold mb-4">${screenTitle}</h2>`}
+
+            <!-- Folder filter dropdown -->
+            <div class="mb-3">
+              <select id="folder-filter" style="width:100%;padding:8px 12px;border-radius:10px;background:#1e293b;border:1px solid #334155;color:#e2e8f0;font-size:13px;">
+                <option value="all" ${folderFilter === null ? 'selected' : ''}>📂 전체 보기</option>
+                <option value="0" ${folderFilter === 0 ? 'selected' : ''}>📂 폴더 없음</option>
+                ${folders.map(f => `<option value="${f.id}" ${folderFilter === f.id ? 'selected' : ''}>${f.icon ? '' : '📁'} ${_escapeHtml(f.name)}</option>`).join('')}
+              </select>
+            </div>
+
+            <!-- Type filter -->
             <div class="flex gap-2 mb-4 overflow-x-auto pb-2">
               ${['all', 'text', 'image', 'document', 'voice'].map(t => `
                 <button class="btn ${filter === t ? 'btn-primary' : 'btn-secondary'} text-xs whitespace-nowrap" onclick="AllMemoriesScreen.setFilter('${t}')">
@@ -1511,11 +2034,39 @@
         </div>
       `;
       UI.refreshIcons();
+      _bindLongPress();
+      _bindFolderFilter();
+    }
+
+    function _bindFolderFilter() {
+      const sel = document.getElementById('folder-filter');
+      if (sel) {
+        sel.addEventListener('change', (e) => {
+          const val = e.target.value;
+          if (val === 'all') folderFilter = null;
+          else if (val === '0') folderFilter = 0;
+          else folderFilter = parseInt(val);
+          _render();
+        });
+      }
+    }
+
+    function _bindLongPress() {
+      document.querySelectorAll('[data-memory-id]').forEach(card => {
+        const id = parseInt(card.dataset.memoryId);
+        ContextMenu.bindLongPress(card, id);
+        card.addEventListener('click', (e) => {
+          if (ContextMenu.isActive()) { e.preventDefault(); e.stopPropagation(); return; }
+          if (ContextMenu.isSelectionMode()) { ContextMenu.toggleSelection(id); return; }
+          App.navigate('viewMemory', { id });
+        });
+      });
     }
 
     function setFilter(f) { filter = f; _render(); }
+    function setFolderFilter(fId, fName) { folderFilter = fId; _folderFilterName = fName || ''; _render(); }
 
-    return { show, setFilter };
+    return { show, setFilter, setFolderFilter };
   })();
   </script>
 
@@ -1527,6 +2078,7 @@
   window.ViewMemoryScreen = (() => {
     async function show(params = {}) {
       if (!params.id) { App.navigate('home'); return; }
+      await HomeScreen._loadFolderMap();
       const memory = await DB.getMemory(params.id);
       if (!memory) { UI.toast('기억을 찾을 수 없습니다', 'error'); App.navigate('home'); return; }
 
@@ -1536,40 +2088,63 @@
         catch(e) { displayContent = '[암호화된 내용 - 복호화 실패]'; }
       }
 
+      // Multi-image support
+      let imageHtml = '';
+      if (memory.imageData) {
+        const imgs = Array.isArray(memory.imageData) ? memory.imageData : [memory.imageData];
+        imageHtml = imgs.map(img => `<img src="${img}" class="w-full rounded-lg max-h-80 object-contain bg-slate-900 mb-2"/>`).join('');
+      }
+
+      // Multi-audio support
+      let audioHtml = '';
+      if (memory.audioData) {
+        const auds = Array.isArray(memory.audioData) ? memory.audioData : [memory.audioData];
+        audioHtml = auds.map(aud => `<audio controls class="w-full mb-2" src="${aud}"></audio>`).join('');
+      }
+
+      // Multi-doc support
+      let docHtml = '';
+      if (memory.docDataList && Array.isArray(memory.docDataList)) {
+        docHtml = memory.docDataList.map((doc, i) => `
+          <div class="card flex items-center gap-3 mb-2">
+            <i data-lucide="file" class="w-8 h-8 text-orange-400"></i>
+            <div class="flex-1"><p class="text-sm font-medium">${_escapeHtml(doc.name || '문서')}</p></div>
+            <button onclick="ViewMemoryScreen.downloadDocByIndex(${memory.id}, ${i})" class="btn btn-secondary text-xs">다운로드</button>
+          </div>
+        `).join('');
+      } else if (memory.docData) {
+        docHtml = `
+          <div class="card flex items-center gap-3">
+            <i data-lucide="file" class="w-8 h-8 text-orange-400"></i>
+            <div class="flex-1"><p class="text-sm font-medium">${_escapeHtml(memory.docName || '문서')}</p></div>
+            <button onclick="ViewMemoryScreen.downloadDoc(${memory.id})" class="btn btn-secondary text-xs">다운로드</button>
+          </div>
+        `;
+      }
+
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="p-4 pb-24 fade-in">
-          <div class="flex items-center justify-between mb-6">
-            <button onclick="App.goBack()" class="p-2 rounded-lg hover:bg-slate-800">
-              <i data-lucide="arrow-left" class="w-5 h-5"></i>
+        ${NavBar.render(memory.title || '기억 보기')}
+        <div class="p-4 pb-24 nav-content-offset fade-in">
+          <div class="flex items-center justify-end mb-4 gap-2">
+            <button onclick="ViewMemoryScreen.edit(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800">
+              <i data-lucide="edit" class="w-5 h-5 text-blue-400"></i>
             </button>
-            <div class="flex gap-2">
-              <button onclick="ViewMemoryScreen.edit(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800">
-                <i data-lucide="edit" class="w-5 h-5 text-blue-400"></i>
-              </button>
-              <button onclick="ViewMemoryScreen.remove(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800">
-                <i data-lucide="trash-2" class="w-5 h-5 text-red-400"></i>
-              </button>
-            </div>
+            <button onclick="ViewMemoryScreen.remove(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800">
+              <i data-lucide="trash-2" class="w-5 h-5 text-red-400"></i>
+            </button>
           </div>
           <div class="space-y-4">
             <h1 class="text-xl font-bold">${_escapeHtml(memory.title || '제목 없음')}</h1>
-            <div class="flex items-center gap-2 text-sm text-slate-400">
+            <div class="flex items-center gap-2 text-sm text-slate-400 flex-wrap">
               <span>${memory.type === 'text' ? '📝' : memory.type === 'image' ? '🖼️' : memory.type === 'document' ? '📄' : '🎤'}</span>
               <span>${UI.formatDate(memory.createdAt)}</span>
               ${memory.priority ? `<span class="priority-badge ${memory.priority === 'high' ? 'priority-high' : memory.priority === 'medium' ? 'priority-medium' : 'priority-low'}">${memory.priority === 'high' ? '높음' : memory.priority === 'medium' ? '보통' : '낮음'}</span>` : ''}
+              ${memory.folderId && HomeScreen.getFolderMap()[memory.folderId] ? `<span class="folder-badge-view">📁 ${_escapeHtml(HomeScreen.getFolderMap()[memory.folderId].name)}</span>` : ''}
             </div>
-            ${memory.imageData ? `<img src="${memory.imageData}" class="w-full rounded-lg max-h-80 object-contain bg-slate-900"/>` : ''}
-            ${memory.audioData ? `<audio controls class="w-full" src="${memory.audioData}"></audio>` : ''}
-            ${memory.docData ? `
-              <div class="card flex items-center gap-3">
-                <i data-lucide="file" class="w-8 h-8 text-orange-400"></i>
-                <div class="flex-1">
-                  <p class="text-sm font-medium">${_escapeHtml(memory.docName || '문서')}</p>
-                </div>
-                <button onclick="ViewMemoryScreen.downloadDoc(${memory.id})" class="btn btn-secondary text-xs">다운로드</button>
-              </div>
-            ` : ''}
+            ${imageHtml}
+            ${audioHtml}
+            ${docHtml}
             <div class="card">
               <p class="text-sm whitespace-pre-wrap">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>
             </div>
@@ -1587,8 +2162,10 @@
     function edit(id) {
       DB.getMemory(id).then(m => {
         if (m) {
-          if (m.type === 'text') TextForm.show({ id });
-          else UI.toast('이 유형은 수정을 지원하지 않습니다', 'info');
+          if (m.type === 'text') App.navigate('addMemory', { type: 'text', id });
+          else if (m.type === 'image') App.navigate('addMemory', { type: 'image', id });
+          else if (m.type === 'document') App.navigate('addMemory', { type: 'document', id });
+          else if (m.type === 'voice') App.navigate('addMemory', { type: 'voice', id });
         }
       });
     }
@@ -1601,19 +2178,61 @@
       }, '삭제');
     }
 
-    async function downloadDoc(id) {
-      const m = await DB.getMemory(id);
-      if (m && m.docData) {
+    function _dataUrlToBlob(dataUrl) {
+      try {
+        const [header, base64] = dataUrl.split(',');
+        const mime = header.match(/:(.*?);/)?.[1] || 'application/octet-stream';
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new Blob([bytes], { type: mime });
+      } catch(e) {
+        console.error('dataUrlToBlob error:', e);
+        return null;
+      }
+    }
+
+    function _triggerDownload(dataUrl, fileName) {
+      const blob = _dataUrlToBlob(dataUrl);
+      if (blob) {
+        const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        a.href = m.docData;
-        a.download = m.docName || 'document';
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 200);
+      } else {
+        // fallback: direct data URL
+        const a = document.createElement('a');
+        a.href = dataUrl;
+        a.download = fileName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
       }
     }
 
-    return { show, edit, remove, downloadDoc };
+    async function downloadDoc(id) {
+      const m = await DB.getMemory(id);
+      if (m && m.docData) {
+        _triggerDownload(m.docData, m.docName || 'document');
+      } else {
+        UI.toast('문서 데이터를 찾을 수 없습니다', 'error');
+      }
+    }
+
+    async function downloadDocByIndex(id, index) {
+      const m = await DB.getMemory(id);
+      if (m && m.docDataList && m.docDataList[index]) {
+        const doc = m.docDataList[index];
+        _triggerDownload(doc.data, doc.name || 'document');
+      } else {
+        UI.toast('문서 데이터를 찾을 수 없습니다', 'error');
+      }
+    }
+
+    return { show, edit, remove, downloadDoc, downloadDocByIndex };
   })();
   </script>
 
@@ -1633,7 +2252,8 @@
 
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="pb-24 fade-in">
+        ${NavBar.render('폴더 관리')}
+        <div class="pb-24 nav-content-offset fade-in">
           <div class="p-4 flex items-center justify-between">
             <h2 class="text-lg font-bold">📁 폴더 관리</h2>
             <button onclick="FolderListScreen.showAddForm()" class="btn btn-primary text-sm flex items-center gap-1">
@@ -1642,7 +2262,7 @@
           </div>
           <div class="px-4" id="folder-list">
             ${folders.length ? folders.map(f => `
-              <div class="card mb-2 flex items-center gap-3">
+              <div class="card mb-2 flex items-center gap-3 cursor-pointer" onclick="FolderListScreen.openFolder(${f.id})">
                 <div class="w-10 h-10 rounded-lg flex items-center justify-center" style="background:${f.color || '#6366f1'}20">
                   <i data-lucide="${f.icon || 'folder'}" class="w-5 h-5" style="color:${f.color || '#6366f1'}"></i>
                 </div>
@@ -1650,10 +2270,10 @@
                   <p class="font-medium text-sm">${_escapeHtml(f.name)}</p>
                   <p class="text-xs text-slate-400">${UI.formatDate(f.createdAt)}</p>
                 </div>
-                <button onclick="FolderListScreen.viewFolder(${f.id})" class="p-2 hover:bg-slate-800 rounded-lg">
+                <button onclick="event.stopPropagation(); FolderListScreen.viewFolder(${f.id})" class="p-2 hover:bg-slate-800 rounded-lg" title="폴더 내부 보기">
                   <i data-lucide="chevron-right" class="w-4 h-4"></i>
                 </button>
-                <button onclick="FolderListScreen.deleteFolder(${f.id}, '${_escapeHtml(f.name)}')" class="p-2 hover:bg-slate-800 rounded-lg">
+                <button onclick="event.stopPropagation(); FolderListScreen.deleteFolder(${f.id}, '${_escapeHtml(f.name)}')" class="p-2 hover:bg-slate-800 rounded-lg" title="폴더 삭제">
                   <i data-lucide="trash-2" class="w-4 h-4 text-red-400"></i>
                 </button>
               </div>
@@ -1731,6 +2351,7 @@
     }
 
     async function viewFolder(folderId) {
+      AppState.set('currentScreen', 'folderView');
       const memories = await DB.getMemoriesByFolder(folderId);
       const folders = await DB.getAllFolders();
       const folder = folders.find(f => f.id === folderId);
@@ -1738,11 +2359,9 @@
 
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="pb-24 fade-in">
+        ${NavBar.render(folder.name)}
+        <div class="pb-24 nav-content-offset fade-in">
           <div class="p-4 flex items-center gap-3">
-            <button onclick="FolderListScreen.show()" class="p-2 rounded-lg hover:bg-slate-800">
-              <i data-lucide="arrow-left" class="w-5 h-5"></i>
-            </button>
             <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background:${folder.color}20">
               <i data-lucide="${folder.icon || 'folder'}" class="w-4 h-4" style="color:${folder.color}"></i>
             </div>
@@ -1761,6 +2380,24 @@
         </div>
       `;
       UI.refreshIcons();
+      // Bind long press on cards inside folder
+      document.querySelectorAll('[data-memory-id]').forEach(card => {
+        const id = parseInt(card.dataset.memoryId);
+        ContextMenu.bindLongPress(card, id);
+        card.addEventListener('click', (e) => {
+          if (ContextMenu.isActive()) { e.preventDefault(); e.stopPropagation(); return; }
+          if (ContextMenu.isSelectionMode()) { ContextMenu.toggleSelection(id); return; }
+          App.navigate('viewMemory', { id });
+        });
+      });
+    }
+
+    async function openFolder(folderId) {
+      // Navigate to AllMemoriesScreen with folder filter set
+      const folders = await DB.getAllFolders();
+      const folder = folders.find(f => f.id === folderId);
+      const folderName = folder ? folder.name : '';
+      App.navigate('allMemories', { folderId, folderName });
     }
 
     function deleteFolder(id, name) {
@@ -1771,7 +2408,7 @@
       }, '삭제');
     }
 
-    return { show, showAddForm, viewFolder, deleteFolder };
+    return { show, showAddForm, viewFolder, openFolder, deleteFolder };
   })();
   </script>
 
@@ -1785,13 +2422,17 @@
       AppState.set('currentScreen', 'settings');
       AppState.set('currentTab', 'settings');
       const encEnabled = AppState.get('encryptionEnabled');
-      const apiKey = AppState.get('abacusApiKey');
+      const geminiKey = AppState.get('geminiApiKey');
+      const groqKey = AppState.get('groqApiKey');
+      const groqModel = AppState.get('groqSttModel') || 'whisper-large-v3';
+      const geminiModel = AppState.get('geminiModel') || 'gemini-3.5-flash';
       const memCount = await DB.getMemoryCount();
       const folderCount = await DB.getFolderCount();
 
       const app = document.getElementById('app');
       app.innerHTML = `
-        <div class="pb-24 fade-in">
+        ${NavBar.render('설정')}
+        <div class="pb-24 nav-content-offset fade-in">
           <div class="p-4">
             <h2 class="text-lg font-bold mb-4">⚙️ 설정</h2>
             <div class="space-y-3">
@@ -1816,10 +2457,56 @@
               <!-- AI -->
               <div class="card">
                 <h3 class="text-sm font-semibold text-slate-400 mb-3">🤖 AI 설정</h3>
-                <div>
-                  <label class="text-xs text-slate-400 mb-1 block">Abacus AI API 키</label>
-                  <input type="password" id="api-key" placeholder="API 키 입력..." value="${apiKey || ''}"/>
-                  <button onclick="SettingsScreen.saveApiKey()" class="btn btn-secondary text-xs mt-2">저장</button>
+                <div class="space-y-3">
+                  <div>
+                    <div class="flex items-center gap-2 mb-1">
+                      <span style="color:#4285f4">●</span>
+                      <label class="text-xs text-slate-400">Gemini API 키</label>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-1">태그 생성 · 이미지 분석 · 음성 파싱에 사용</p>
+                    <input type="password" id="gemini-key" placeholder="AIza... 형식의 Gemini API 키" value="${geminiKey || ''}"/>
+                  </div>
+                  <div>
+                    <div class="flex items-center gap-2 mb-1">
+                      <span style="color:#f59e0b">●</span>
+                      <label class="text-xs text-slate-400">Groq API 키</label>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-1">음성 전사(Whisper) · TTS(PlayAI)에 사용</p>
+                    <input type="password" id="groq-key" placeholder="gsk_... 형식의 Groq API 키" value="${groqKey || ''}"/>
+                  </div>
+                  <button onclick="SettingsScreen.saveApiKeys()" class="btn btn-primary w-full flex items-center justify-center gap-2">
+                    <i data-lucide="save" class="w-4 h-4"></i> API 키 저장
+                  </button>
+                  <div class="text-xs text-slate-500 space-y-1">
+                    <p>• Gemini 무료 키: <a href="https://aistudio.google.com" target="_blank" class="text-indigo-400 underline">aistudio.google.com</a></p>
+                    <p>• Groq 무료: <a href="https://console.groq.com" target="_blank" class="text-indigo-400 underline">console.groq.com</a></p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- AI Model Selection -->
+              <div class="card">
+                <h3 class="text-sm font-semibold text-slate-400 mb-3">🧠 AI 모델 선택 <span class="text-xs text-slate-500">사용할 모델을 직접 선택하세요</span></h3>
+                <div class="space-y-4">
+                  <div>
+                    <label class="text-xs text-slate-400 mb-1 block">Gemini 텍스트 생성 모델 (한국어)</label>
+                    <select id="gemini-model">
+                      <option value="gemini-3.5-flash" ${geminiModel === 'gemini-3.5-flash' ? 'selected' : ''}>Gemini 3.5 Flash (기본)</option>
+                      <option value="gemini-3.1-pro-preview" ${geminiModel === 'gemini-3.1-pro-preview' ? 'selected' : ''}>Gemini 3.1 Pro Preview</option>
+                      <option value="gemini-3-flash-preview" ${geminiModel === 'gemini-3-flash-preview' ? 'selected' : ''}>Gemini 3 Flash Preview</option>
+                      <option value="gemini-3.1-flash-lite" ${geminiModel === 'gemini-3.1-flash-lite' ? 'selected' : ''}>Gemini 3.1 Flash Lite</option>
+                    </select>
+                    <p class="text-xs text-slate-500 mt-1">태그 생성 · 이미지 분석 · 텍스트 요약에 사용</p>
+                  </div>
+                  <div>
+                    <label class="text-xs text-slate-400 mb-1 block">Groq 음성 인식 모델 (한국어)</label>
+                    <select id="groq-model">
+                      <option value="whisper-large-v3" ${groqModel === 'whisper-large-v3' ? 'selected' : ''}>whisper-large-v3 (최고 성능)</option>
+                      <option value="whisper-large-v3-turbo" ${groqModel === 'whisper-large-v3-turbo' ? 'selected' : ''}>whisper-large-v3-turbo (빠른 속도)</option>
+                      <option value="distil-whisper-large-v3-en" ${groqModel === 'distil-whisper-large-v3-en' ? 'selected' : ''}>distil-whisper-large-v3-en (영어 최적)</option>
+                    </select>
+                    <p class="text-xs text-slate-500 mt-1">한국어 인식: whisper-large-v3 추천</p>
+                  </div>
                 </div>
               </div>
 
@@ -1850,8 +2537,8 @@
 
               <!-- About -->
               <div class="card text-center">
-                <p class="text-xs text-slate-500">Memory Vault v1.0</p>
-                <p class="text-xs text-slate-600">Powered by Abacus AI</p>
+                <p class="text-xs text-slate-500">Memory Vault v1.7</p>
+                <p class="text-xs text-slate-600">Powered by Gemini & Groq AI</p>
               </div>
             </div>
           </div>
@@ -1867,6 +2554,26 @@
       });
 
       document.getElementById('import-file').addEventListener('change', _handleImport);
+
+      // Gemini model change listener
+      const geminiModelEl = document.getElementById('gemini-model');
+      if (geminiModelEl) {
+        geminiModelEl.addEventListener('change', async (e) => {
+          AppState.set('geminiModel', e.target.value);
+          await DB.setSetting('geminiModel', e.target.value);
+          UI.toast('Gemini 모델이 변경되었습니다: ' + e.target.value, 'success');
+        });
+      }
+
+      // Groq model change listener
+      const groqModelEl = document.getElementById('groq-model');
+      if (groqModelEl) {
+        groqModelEl.addEventListener('change', async (e) => {
+          AppState.set('groqSttModel', e.target.value);
+          await DB.setSetting('groqSttModel', e.target.value);
+          UI.toast('음성 인식 모델이 변경되었습니다', 'success');
+        });
+      }
     }
 
     function changePin() {
@@ -1905,11 +2612,19 @@
       overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
     }
 
-    async function saveApiKey() {
-      const key = document.getElementById('api-key').value.trim();
-      AppState.set('abacusApiKey', key);
-      await DB.setSetting('abacusApiKey', key);
+    async function saveApiKeys() {
+      const geminiKey = document.getElementById('gemini-key').value.trim();
+      const groqKey = document.getElementById('groq-key').value.trim();
+      AppState.set('geminiApiKey', geminiKey);
+      AppState.set('groqApiKey', groqKey);
+      await DB.setSetting('geminiApiKey', geminiKey);
+      await DB.setSetting('groqApiKey', groqKey);
       UI.toast('API 키가 저장되었습니다', 'success');
+    }
+
+    // Backward compat
+    async function saveApiKey() {
+      await saveApiKeys();
     }
 
     async function exportData() {
@@ -1960,7 +2675,7 @@
       LockScreen.show();
     }
 
-    return { show, changePin, saveApiKey, exportData, clearData, lock };
+    return { show, changePin, saveApiKey, saveApiKeys, exportData, clearData, lock };
   })();
   </script>
 
@@ -1970,7 +2685,8 @@
    * App - Main entry point, router, navigation
    */
   window.App = (() => {
-    const history = [];
+    const historyStack = [];
+    const forwardStack = [];
 
     async function init() {
       try {
@@ -1989,8 +2705,16 @@
     function navigate(screen, params = {}) {
       const current = AppState.get('currentScreen');
       if (current && current !== screen) {
-        history.push({ screen: current, params: {} });
+        historyStack.push({ screen: current, params: {} });
+        forwardStack.length = 0; // Clear forward when navigating new
       }
+
+      _showScreen(screen, params);
+    }
+
+    function _showScreen(screen, params) {
+      // Close any open context menu
+      if (window.ContextMenu) ContextMenu.close();
 
       switch (screen) {
         case 'lock': LockScreen.show(); break;
@@ -2004,23 +2728,46 @@
           else TextForm.show(params);
           break;
         case 'viewMemory': ViewMemoryScreen.show(params); break;
-        case 'allMemories': AllMemoriesScreen.show(); break;
+        case 'allMemories': AllMemoriesScreen.show(params); break;
         case 'folders': FolderListScreen.show(); break;
+        case 'folderView':
+          if (params.folderId) FolderListScreen.viewFolder(params.folderId);
+          else FolderListScreen.show();
+          break;
         case 'settings': SettingsScreen.show(); break;
         default: HomeScreen.show();
       }
     }
 
     function goBack() {
-      if (history.length > 0) {
-        const prev = history.pop();
-        navigate(prev.screen, prev.params);
+      if (historyStack.length > 0) {
+        const current = AppState.get('currentScreen');
+        forwardStack.push({ screen: current, params: {} });
+        const prev = historyStack.pop();
+        _showScreen(prev.screen, prev.params);
       } else {
         navigate('home');
       }
     }
 
-    return { init, navigate, goBack };
+    function goForward() {
+      if (forwardStack.length > 0) {
+        const current = AppState.get('currentScreen');
+        historyStack.push({ screen: current, params: {} });
+        const next = forwardStack.pop();
+        _showScreen(next.screen, next.params);
+      }
+    }
+
+    function canGoForward() {
+      return forwardStack.length > 0;
+    }
+
+    function getHistoryLength() {
+      return historyStack.length;
+    }
+
+    return { init, navigate, goBack, goForward, canGoForward, getHistoryLength };
   })();
 
   window.addEventListener('DOMContentLoaded', () => App.init());
