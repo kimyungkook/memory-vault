@@ -9,7 +9,7 @@
   <title>Memory Vault - 기억속 저장</title>
   <link id="manifest-link" rel="manifest"/>
   <!-- Tailwind CSS CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
   <!-- Dexie.js for IndexedDB -->
   <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
   <!-- Lucide Icons -->
@@ -84,8 +84,8 @@
       name: "기억속 저장 - Memory Vault",
       short_name: "Memory Vault",
       description: "안전한 개인 기억 저장소 PWA",
-      start_url: "./",
-      scope: "./",
+      start_url: "/",
+      scope: "/",
       display: "standalone",
       orientation: "portrait",
       theme_color: "#6366f1",
@@ -171,10 +171,10 @@
       });
     `;
 
-    if ('serviceWorker' in navigator) {
+   if ('serviceWorker' in navigator) {
       const swBlob = new Blob([swCode], { type: 'application/javascript' });
       const swURL = URL.createObjectURL(swBlob);
-      navigator.serviceWorker.register(swURL, { scope: './' }).then((reg) => {
+      navigator.serviceWorker.register(swURL).then((reg) => {
         console.log('[SW] Registered via Blob URL', reg.scope);
       }).catch((err) => {
         console.warn('[SW] Registration failed:', err);
