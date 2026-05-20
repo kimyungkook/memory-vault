@@ -2309,38 +2309,50 @@ function toggleDimScreen() {
   if (dimOverlay) {
     dimOverlay.remove();
     dimOverlay = null;
-    // 전체화면 해제
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    }
+    try {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    } catch(e) {}
     UI.toast('화면 밝기 복귀됨 🌕', 'info');
   } else {
-    // ✅ 전체화면 요청 → 상태바 + 하단바 완전 숨김
-    document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+    try {
+      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+      }
+    } catch(e) {}
 
     dimOverlay = document.createElement('div');
+    // 안전영역(노치)까지 완벽하게 덮는 최상위 레이어
     dimOverlay.style.cssText = `
       position: fixed;
-      inset: 0;
-      background: #000000;
-      z-index: 99999;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #000000;
+      z-index: 2147483647; 
       cursor: pointer;
     `;
-    // ✅ 우상단 작은 녹색 점만 표시
+    
+    // 배터리 위치(우상단) 근처에서 숨쉬듯 깜빡이는 작은 점
     dimOverlay.innerHTML = `
       <div style="
-        position:absolute;
-        top:8px;
-        right:12px;
-        width:7px;
-        height:7px;
-        border-radius:50%;
-        background:#22c55e;
-        opacity:0.7;
+        position: absolute;
+        top: max(16px, env(safe-area-inset-top));
+        right: max(16px, env(safe-area-inset-right));
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background-color: #22c55e;
+        box-shadow: 0 0 8px #22c55e;
+        animation: dimPulse 2.5s infinite ease-in-out;
       "></div>
+      <style>
+        @keyframes dimPulse {
+          0%, 100% { opacity: 0.1; transform: scale(0.8); }
+          50% { opacity: 1; transform: scale(1.2); }
+        }
+      </style>
     `;
     dimOverlay.addEventListener('click', toggleDimScreen);
     document.body.appendChild(dimOverlay);
+    UI.toast('🌙 절전 모드 작동 (탭하여 복귀)', 'info');
   }
 }
 
@@ -2822,15 +2834,16 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
       }
     }
 
-    let _ttsPlaying = false;
-
     function readAloud(id) {
-      if (_ttsPlaying) {
-        speechSynthesis.cancel();
-        _ttsPlaying = false;
+      if (!('speechSynthesis' in window)) { UI.toast('TTS 미지원 기기', 'error'); return; }
+      
+      // 이미 말하고 있다면 즉시 중지
+      if (window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
         UI.toast('🔇 읽기 중지', 'info');
         return;
       }
+
       DB.getMemory(id).then(async m => {
         if (!m) return;
         let text = (m.title ? m.title + '. ' : '') + (m.content || '');
@@ -2838,18 +2851,30 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
           try { text = m.title + '. ' + await CryptoUtil.decrypt(m.content, AppState.get('pin')); } catch(e) {}
         }
         if (!text.trim()) { UI.toast('읽을 내용이 없습니다', 'info'); return; }
-        if (!('speechSynthesis' in window)) { UI.toast('TTS 미지원 기기', 'error'); return; }
-        speechSynthesis.cancel();
-        const utt = new SpeechSynthesisUtterance(text);
-        utt.lang = 'ko-KR';
-        utt.rate = 1.0;
-        const voices = speechSynthesis.getVoices();
-        const ko = voices.find(v => v.lang.startsWith('ko'));
-        if (ko) utt.voice = ko;
-        utt.onstart = () => { _ttsPlaying = true; UI.toast('🔊 읽기 시작 — 다시 탭하면 중지', 'info'); };
-        utt.onend = () => { _ttsPlaying = false; };
-        utt.onerror = () => { _ttsPlaying = false; };
-        speechSynthesis.speak(utt);
+        
+        window.speechSynthesis.cancel(); // 초기화
+
+        const playTTS = () => {
+          const utt = new SpeechSynthesisUtterance(text);
+          utt.lang = 'ko-KR';
+          utt.rate = 1.0;
+          const voices = window.speechSynthesis.getVoices();
+          const ko = voices.find(v => v.lang.includes('ko') || v.lang.includes('KO'));
+          if (ko) utt.voice = ko;
+          
+          utt.onstart = () => { UI.toast('🔊 읽기 시작 — 다시 탭하면 중지', 'info'); };
+          window.speechSynthesis.speak(utt);
+        };
+
+        // 목소리 로딩 대기 (안드로이드/크롬 대응)
+        if (window.speechSynthesis.getVoices().length === 0) {
+          window.speechSynthesis.onvoiceschanged = () => {
+            playTTS();
+            window.speechSynthesis.onvoiceschanged = null;
+          };
+        } else {
+          playTTS();
+        }
       });
     }
 
