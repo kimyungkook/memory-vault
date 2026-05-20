@@ -2305,54 +2305,56 @@ function showDriveMode() {
 
    // ✅ 화면 어둡게 기능
 
+// ✅ 화면 어둡게 기능 (가로줄무늬 완벽 제거 및 숨쉬는 점)
 function toggleDimScreen() {
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
   if (dimOverlay) {
     dimOverlay.remove();
     dimOverlay = null;
-    try {
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    } catch(e) {}
+    // 🌕 복귀: 브라우저 상단 상태바 색상 원상복구
+    if (themeMeta) themeMeta.setAttribute('content', '#6366f1');
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
     UI.toast('화면 밝기 복귀됨 🌕', 'info');
   } else {
-    try {
-      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-        document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
-      }
-    } catch(e) {}
+    // 🌑 절전: 보라색 가로줄(상태바) 제거를 위해 테마 색상을 블랙으로 덮어씀
+    if (themeMeta) themeMeta.setAttribute('content', '#000000');
+    if (document.documentElement.requestFullscreen) {
+      document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+    }
 
     dimOverlay = document.createElement('div');
-    // 안전영역(노치)까지 완벽하게 덮는 최상위 레이어
+    // 1px의 틈새도 허용하지 않도록 화면 바깥까지 여유 있게 팽창
     dimOverlay.style.cssText = `
       position: fixed;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #000000;
-      z-index: 2147483647; 
+      top: -10px; left: -10px; right: -10px; bottom: -10px;
+      background: #000000;
+      z-index: 2147483647;
       cursor: pointer;
     `;
-    
-    // 배터리 위치(우상단) 근처에서 숨쉬듯 깜빡이는 작은 점
+    // ✅ 우상단 배터리 근처에 숨쉬는 작은 녹색 점
     dimOverlay.innerHTML = `
       <div style="
-        position: absolute;
-        top: max(16px, env(safe-area-inset-top));
-        right: max(16px, env(safe-area-inset-right));
-        width: 6px;
-        height: 6px;
+        position:absolute;
+        top: max(24px, env(safe-area-inset-top));
+        right: max(24px, env(safe-area-inset-right));
+        width: 8px;
+        height: 8px;
         border-radius: 50%;
-        background-color: #22c55e;
-        box-shadow: 0 0 8px #22c55e;
+        background: #22c55e;
+        box-shadow: 0 0 10px #22c55e;
         animation: dimPulse 2.5s infinite ease-in-out;
       "></div>
       <style>
         @keyframes dimPulse {
-          0%, 100% { opacity: 0.1; transform: scale(0.8); }
-          50% { opacity: 1; transform: scale(1.2); }
+          0%, 100% { opacity: 0.2; transform: scale(0.8); }
+          50% { opacity: 1; transform: scale(1.3); }
         }
       </style>
     `;
     dimOverlay.addEventListener('click', toggleDimScreen);
     document.body.appendChild(dimOverlay);
-    UI.toast('🌙 절전 모드 작동 (탭하여 복귀)', 'info');
   }
 }
 
@@ -2683,21 +2685,16 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
         `;
       }
 
-      const app = document.getElementById('app');
-      app.innerHTML = `
-        ${NavBar.render(memory.title || '기억 보기')}
-        <div class="p-4 pb-24 nav-content-offset fade-in">
-         <div class="flex items-center justify-end mb-4 gap-2">
-            <button onclick="ViewMemoryScreen.readAloud(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800" title="읽어주기">
-              <i data-lucide="volume-2" class="w-5 h-5 text-green-400"></i>
+       <!-- ✅ 중앙에 명확하게 보이는 툴바 버튼 패널 -->
+         <div class="flex items-center justify-center mb-6 gap-3 p-2" style="background:#1e293b; border-radius:12px; border:1px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+            <button onclick="ViewMemoryScreen.readAloud(${memory.id})" class="btn btn-secondary flex items-center gap-1 flex-1 justify-center" style="padding:8px" title="읽어주기">
+              <span style="font-size:18px">🔊</span> <span style="font-size:13px">읽기</span>
             </button>
-            <button onclick="ViewMemoryScreen.edit(${memory.id})"
-              class="p-2 rounded-lg hover:bg-slate-800">
-              <i data-lucide="edit" class="w-5 h-5 text-blue-400"></i>
+            <button onclick="ViewMemoryScreen.edit(${memory.id})" class="btn btn-secondary flex items-center gap-1 flex-1 justify-center" style="padding:8px">
+              <span style="font-size:18px">📝</span> <span style="font-size:13px">수정</span>
             </button>
-            <button onclick="ViewMemoryScreen.remove(${memory.id})"
-              class="p-2 rounded-lg hover:bg-slate-800">
-              <i data-lucide="trash-2" class="w-5 h-5 text-red-400"></i>
+            <button onclick="ViewMemoryScreen.remove(${memory.id})" class="btn flex items-center gap-1 flex-1 justify-center" style="padding:8px; background:rgba(239,68,68,0.15); color:#f87171">
+              <span style="font-size:18px">🗑️</span> <span style="font-size:13px">삭제</span>
             </button>
           </div>
           <div class="space-y-4">
