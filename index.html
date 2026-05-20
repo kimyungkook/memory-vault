@@ -2307,40 +2307,40 @@ function showDriveMode() {
 
 function toggleDimScreen() {
   if (dimOverlay) {
-    // 밝기 복귀
     dimOverlay.remove();
     dimOverlay = null;
+    // 전체화면 해제
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
     UI.toast('화면 밝기 복귀됨 🌕', 'info');
   } else {
-    // 화면을 거의 까맣게 (0.02 = 아주 약간만 빛남)
+    // ✅ 전체화면 요청 → 상태바 + 하단바 완전 숨김
+    document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+
     dimOverlay = document.createElement('div');
     dimOverlay.style.cssText = `
       position: fixed;
       inset: 0;
-      background: rgba(0,0,0,0.97);
+      background: #000000;
       z-index: 99999;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 12px;
       cursor: pointer;
     `;
+    // ✅ 우상단 작은 녹색 점만 표시
     dimOverlay.innerHTML = `
       <div style="
         position:absolute;
-        top:10px;
-        right:14px;
-        width:6px;
-        height:6px;
+        top:8px;
+        right:12px;
+        width:7px;
+        height:7px;
         border-radius:50%;
-        background:rgba(255,255,255,0.25);
+        background:#22c55e;
+        opacity:0.7;
       "></div>
     `;
-    // 탭하면 즉시 밝기 복귀
     dimOverlay.addEventListener('click', toggleDimScreen);
     document.body.appendChild(dimOverlay);
-    UI.toast('화면 어두워짐 🌙 녹음은 계속 중!', 'info');
   }
 }
 
@@ -2676,8 +2676,7 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
         ${NavBar.render(memory.title || '기억 보기')}
         <div class="p-4 pb-24 nav-content-offset fade-in">
          <div class="flex items-center justify-end mb-4 gap-2">
-            <button onclick="ViewMemoryScreen.readAloud(${memory.id})"
-              class="p-2 rounded-lg hover:bg-slate-800" title="읽어주기">
+            <button onclick="ViewMemoryScreen.readAloud(${memory.id})" class="p-2 rounded-lg hover:bg-slate-800" title="읽어주기">
               <i data-lucide="volume-2" class="w-5 h-5 text-green-400"></i>
             </button>
             <button onclick="ViewMemoryScreen.edit(${memory.id})"
@@ -2823,7 +2822,6 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
       }
     }
 
-    let _ttsUtterance = null;
     let _ttsPlaying = false;
 
     function readAloud(id) {
@@ -2837,13 +2835,10 @@ return { show, removeAudio, toggleDimScreen, showDriveMode };
         if (!m) return;
         let text = (m.title ? m.title + '. ' : '') + (m.content || '');
         if (m.encrypted && AppState.get('pin')) {
-          try { text = m.title + '. ' + await CryptoUtil.decrypt(m.content, AppState.get('pin')); }
-          catch(e) {}
+          try { text = m.title + '. ' + await CryptoUtil.decrypt(m.content, AppState.get('pin')); } catch(e) {}
         }
         if (!text.trim()) { UI.toast('읽을 내용이 없습니다', 'info'); return; }
-        if (!('speechSynthesis' in window)) {
-          UI.toast('이 기기는 TTS 미지원', 'error'); return;
-        }
+        if (!('speechSynthesis' in window)) { UI.toast('TTS 미지원 기기', 'error'); return; }
         speechSynthesis.cancel();
         const utt = new SpeechSynthesisUtterance(text);
         utt.lang = 'ko-KR';
