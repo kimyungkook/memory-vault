@@ -396,7 +396,8 @@
       groqApiKey: '',
       groqSttModel: 'whisper-large-v3',
       geminiModel: 'gemini-3.5-flash',
-      geminiProModel: 'gemini-2.5-flash-preview-05-20'
+      geminiProModel: 'gemini-2.5-flash-preview-05-20',
+      isStealthMode: false
     };
     const listeners = {};
 
@@ -855,8 +856,17 @@
         return;
       }
 
+      // 페이크 PIN 체크 (스텔스 모드 진입)
+      const fakePinHash = await DB.getSetting('fakePinHash');
+      if (fakePinHash && inputHash === fakePinHash) {
+        AppState.set('isStealthMode', true);
+        FakeHomeScreen.show();
+        return;
+      }
+
       if (inputHash === storedHash) {
         attempts = 0;
+        AppState.set('isStealthMode', false);
         AppState.set('pin', pin);
         AppState.set('isLocked', false);
         App.navigate('home');
@@ -996,7 +1006,8 @@
             const groqKey = AppState.get('groqApiKey');
             if (groqKey) {
               try {
-                const text = await AbacusAI.transcribeAudio(blob);
+                const sttResult = await AbacusAI.transcribeAudio(blob);
+              const text = (sttResult && sttResult.text) ? sttResult.text : '';
                 if (text && text.trim()) {
                   transcriptText = text.trim();
                 }
@@ -1156,6 +1167,23 @@
             </div>
           </div>
           `}
+
+<!-- AI 기능 -->
+          <div class="px-4 mb-4">
+            <h3 class="text-sm font-semibold text-slate-400 mb-2">🤖 AI 기능</h3>
+            <div class="grid grid-cols-2 gap-2">
+              <button onclick="App.navigate('ghost')" class="card text-left py-3 px-3" style="border-color:rgba(99,102,241,0.4);">
+                <div style="font-size:22px;margin-bottom:4px">👻</div>
+                <p class="text-sm font-semibold">나의 고스트</p>
+                <p class="text-xs text-slate-400">과거의 나와 대화</p>
+              </button>
+              <button onclick="App.navigate('network')" class="card text-left py-3 px-3" style="border-color:rgba(99,102,241,0.4);">
+                <div style="font-size:22px;margin-bottom:4px">🕸️</div>
+                <p class="text-sm font-semibold">인맥 관계도</p>
+                <p class="text-xs text-slate-400">통화 인물 시각화</p>
+              </button>
+            </div>
+          </div>
 
           <!-- Recent Memories -->
           <div class="px-4">
@@ -1744,7 +1772,8 @@
     let editId = null;
     let dimOverlay = null;
     let wakeLock = null;
-    let silentAudio = null;   // ← 무음 오디오 객체
+    let silentAudio = null;    // ← 무음 오디오 객체
+    let _lastSegments = [];    // ← 세그먼트 임시 보관
 
     async function show(params = {}) {
       AppState.set('currentScreen', 'addMemory');
@@ -1880,7 +1909,9 @@
             UI.showLoading('통화 녹음 AI 분석 중...');
             
             try {
-              const text = await AbacusAI.transcribeAudio(file);
+              const sttResult5b = await AbacusAI.transcribeAudio(file);
+              const text = (sttResult5b && sttResult5b.text) ? sttResult5b.text : '';
+              _lastSegments = (sttResult5b && sttResult5b.segments) ? sttResult5b.segments : [];
               if (text && text.trim()) {
                 const currentVal = transcriptEl.value.trim();
                 transcriptEl.value = currentVal ? currentVal + '\n\n' + text.trim() : text.trim();
@@ -2008,7 +2039,9 @@
           if (groqKey) {
             if (statusEl) statusEl.textContent = '🤖 AI가 음성을 텍스트로 변환 중...';
             try {
-              const text = await AbacusAI.transcribeAudio(audioBlob);
+              const sttResult = await AbacusAI.transcribeAudio(audioBlob);
+        const text = (sttResult && sttResult.text) ? sttResult.text : '';
+        _lastSegments = (sttResult && sttResult.segments) ? sttResult.segments : [];
               if (text && text.trim()) {
                 if (transcriptEl) transcriptEl.value = text.trim();
                 if (statusEl) statusEl.textContent = '✅ 변환 완료!';
@@ -2117,7 +2150,14 @@
           await DB.updateMemory(editId, { title, content: transcriptText, audioData: audioStore, folderId, priority, tags });
           UI.toast('음성이 수정되었습니다', 'success');
         } else {
-          await DB.addMemory({ title, content: transcriptText, type: 'voice', audioData: audioStore, folderId, priority, tags, encrypted: false });
+          const newMemId = await DB.addMemory({ title, content: transcriptText, type: 'voice', audioData: audioStore, folderId, priority, tags, encrypted: false });
+        // 백그라운드 대본 변환
+        const _segsForConvert = _lastSegments.slice();
+        const _blobForConvert = audioBlob || (audioDataList.length > 0 ? audioDataList[0] : null);
+        _lastSegments = [];
+        if (_blobForConvert || _segsForConvert.length > 0 || transcriptText) {
+          setTimeout(() => convertToScript(newMemId, _blobForConvert, title, _segsForConvert, transcriptText), 400);
+        }
           UI.toast('음성이 저장되었습니다', 'success');
         }
         App.navigate('home');
@@ -2218,9 +2258,14 @@
 
             hintEl.textContent = '🎙️ Step 1/3 — 음성 텍스트 변환 중...';
             let transcriptText = '';
+            let transcriptSegments = [];
             const groqKey = AppState.get('groqApiKey');
             if (groqKey) {
-              try { transcriptText = await AbacusAI.transcribeAudio(blob) || ''; } catch(e) {}
+              try {
+                const sttResult = await AbacusAI.transcribeAudio(blob);
+                transcriptText = (sttResult && sttResult.text) ? sttResult.text : '';
+                transcriptSegments = (sttResult && sttResult.segments) ? sttResult.segments : [];
+              } catch(e) { transcriptSegments = []; }
             }
 
             hintEl.textContent = '🤖 Step 2/3 — AI 제목 생성 중...';
@@ -2271,7 +2316,7 @@
                 } catch(e) {}
               }
 
-              await DB.addMemory({
+              const savedDriveId = await DB.addMemory({
                 title: autoTitle,
                 type: 'voice',
                 content: finalContent,
@@ -2281,6 +2326,10 @@
                 folderId: null,
                 encrypted: false
               });
+              // 백그라운드 대본 변환 (저장 완료 후 비동기 실행)
+              setTimeout(() => convertToScript(
+                savedDriveId, null, autoTitle, transcriptSegments, transcriptText
+              ), 400);
 
               timerEl.textContent = '✅';
               btn.innerHTML = '<span style="font-size:36px">🎉</span>';
@@ -2472,7 +2521,8 @@
       formData.append('file', audioBlob, 'audio.webm');
       formData.append('model', model);
       formData.append('language', 'ko');
-      formData.append('response_format', 'json');
+      formData.append('response_format', 'verbose_json');
+      formData.append('timestamp_granularities[]', 'segment');
 
       const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST',
@@ -2480,11 +2530,72 @@
         body: formData
       });
       const data = await response.json();
-      return data.text || '';
+      // { text, segments } 객체로 반환 (segments = 문장별 시간정보 배열)
+      return { text: data.text || '', segments: data.segments || [] };
     }
 
     return { callLLM, analyzeImage, transcribeAudio };
   })();
+  </script>
+
+<!-- ==================== SCRIPT CONVERTER ==================== -->
+  <script>
+  /**
+   * convertToScript - 음성→화자분리 대본 변환 파이프라인
+   * 3가지 경로 모두 이 함수 하나로 처리
+   */
+  window.convertToScript = async function(memoryId, audioSource, title, segments, existingText) {
+    const groqKey  = AppState.get('groqApiKey');
+    const geminiKey = AppState.get('geminiApiKey');
+    let textToUse = existingText || '';
+    let segsToUse = Array.isArray(segments) ? segments : [];
+
+    // segments 없고 오디오 있으면 → Groq 재호출
+    if (segsToUse.length === 0 && audioSource && groqKey) {
+      try {
+        let blob;
+        if (audioSource instanceof Blob) {
+          blob = audioSource;
+        } else if (typeof audioSource === 'string' && audioSource.includes('base64')) {
+          const arr  = audioSource.split(',');
+          const mime = (arr[0].match(/:(.*?);/) || [])[1] || 'audio/webm';
+          const bstr = atob(arr[1]);
+          const u8   = new Uint8Array(bstr.length);
+          for (let i = 0; i < bstr.length; i++) u8[i] = bstr.charCodeAt(i);
+          blob = new Blob([u8], { type: mime });
+        }
+        if (blob) {
+          const res = await AbacusAI.transcribeAudio(blob);
+          if (res) { textToUse = res.text || textToUse; segsToUse = res.segments || []; }
+        }
+      } catch(e) { console.warn('[convertToScript] Groq 오류:', e); }
+    }
+
+    if (!textToUse && segsToUse.length === 0) return; // 변환할 내용 없음
+
+    let scriptContent = textToUse; // 기본값: 일반 텍스트
+
+    if (geminiKey) {
+      try {
+        const segData = segsToUse.length > 0
+          ? JSON.stringify(segsToUse.map(s => ({ start: +(s.start||0).toFixed(1), text: (s.text||'').trim() })))
+          : JSON.stringify([{ start: 0.0, text: textToUse }]);
+
+        const result = await AbacusAI.callLLM(
+          `당신은 대본 전문가입니다.\n규칙:\n1. 파일명에서 상대방 이름 추출(없으면 "상대방" 사용)\n2. 시간대·존댓말·호칭으로 화자 분류\n3. 순수 JSON 배열만 출력(마크다운·설명 금지)\n\n파일명: ${title}\n세그먼트: ${segData}\n\n출력예: [{"speaker":"나","text":"안녕하세요","start":0.0}]`,
+          '순수 JSON 배열만 반환. 설명 없음.'
+        );
+        if (result) {
+          const clean  = result.replace(/```json|```/g, '').trim();
+          const parsed = JSON.parse(clean);
+          if (Array.isArray(parsed) && parsed.length > 0) scriptContent = JSON.stringify(parsed);
+        }
+      } catch(e) { console.warn('[convertToScript] Gemini 오류·파싱실패:', e); }
+    }
+
+    try { await DB.updateMemory(memoryId, { content: scriptContent }); }
+    catch(e) { console.warn('[convertToScript] DB 오류:', e); }
+  };
   </script>
 
   <!-- ==================== SCREEN: ALL MEMORIES ==================== -->
@@ -2675,6 +2786,32 @@
         `;
       }
 
+// ── 대본 뷰어 HTML 사전 계산 ──
+      let _contentHtml;
+      if (memory.type === 'voice' && displayContent && displayContent.trim().startsWith('[')) {
+        try {
+          const _segs = JSON.parse(displayContent);
+          if (Array.isArray(_segs) && _segs.length > 0) {
+            const _fmt = (s) => {
+              const m = Math.floor((s||0)/60), sec = Math.floor((s||0)%60);
+              return String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+            };
+            _contentHtml = `<div id="script-view" style="display:flex;flex-direction:column;gap:6px;">
+              ${_segs.map((seg, i) => `
+                <div style="display:flex;align-items:flex-start;gap:8px;padding:8px;border-radius:10px;background:#0f172a;border:1px solid #1e293b;">
+                  <button class="spk-btn" data-idx="${i}" style="min-width:72px;max-width:88px;padding:4px 6px;border-radius:6px;background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.3);color:#a5b4fc;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0;text-align:center;">${_escapeHtml(seg.speaker||'화자')}</button>
+                  <div class="seg-text" data-idx="${i}" contenteditable="true" style="flex:1;font-size:13px;color:#e2e8f0;line-height:1.7;outline:none;border-bottom:1px dashed #334155;padding-bottom:2px;min-width:0;word-break:break-all;">${_escapeHtml(seg.text||'')}</div>
+                  <span style="font-size:10px;color:#475569;white-space:nowrap;padding-top:5px;flex-shrink:0;">${_fmt(seg.start)}</span>
+                </div>
+              `).join('')}
+            </div>`;
+          }
+        } catch(e) { _contentHtml = null; }
+      }
+      if (!_contentHtml) {
+        _contentHtml = `<p class="text-sm whitespace-pre-wrap">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>`;
+      }
+
       const app = document.getElementById('app');
       app.innerHTML = `
         ${NavBar.render(memory.title || '기억 보기')}
@@ -2707,8 +2844,8 @@
             ${audioHtml}
             ${docHtml}
 
-            <div class="card">
-              <p class="text-sm whitespace-pre-wrap">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>
+            <div class="card" style="padding:12px;">
+              ${_contentHtml}
             </div>
             ${memory.tags && memory.tags.length ? `
               <div class="flex flex-wrap gap-1">
@@ -2719,6 +2856,44 @@
         </div>
       `;
       UI.refreshIcons();
+// ── 대본 뷰어 이벤트 바인딩 ──
+      let _liveSegs = null;
+      if (memory.type === 'voice' && displayContent && displayContent.trim().startsWith('[')) {
+        try { _liveSegs = JSON.parse(displayContent); } catch(e) {}
+      }
+      if (_liveSegs) {
+        // 화자 버튼 → 인라인 입력으로 이름 변경 (window.prompt 대신 · 갤럭시 호환)
+        document.querySelectorAll('.spk-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            if (btn.dataset.editing === '1') return;
+            btn.dataset.editing = '1';
+            const cur = _liveSegs[parseInt(btn.dataset.idx)].speaker || '화자';
+            btn.innerHTML = `<input style="width:62px;font-size:11px;background:transparent;border:none;outline:1px solid #6366f1;border-radius:3px;color:#a5b4fc;text-align:center;padding:1px;" value="${_escapeHtml(cur)}"/>`;
+            const inp = btn.querySelector('input');
+            inp.focus(); inp.select();
+            const commit = async () => {
+              const newName = inp.value.trim() || cur;
+              _liveSegs[parseInt(btn.dataset.idx)].speaker = newName;
+              btn.innerHTML = _escapeHtml(newName);
+              btn.dataset.editing = '0';
+              await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
+              UI.toast('✅ 화자 변경됨', 'success');
+            };
+            inp.addEventListener('blur', commit);
+            inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+          });
+        });
+        // 텍스트 직접 수정 → 포커스 이동 시 자동 저장
+        document.querySelectorAll('.seg-text').forEach(el => {
+          el.addEventListener('blur', async () => {
+            const idx = parseInt(el.dataset.idx);
+            const newText = el.textContent.trim();
+            if (!_liveSegs[idx] || _liveSegs[idx].text === newText) return;
+            _liveSegs[idx].text = newText;
+            await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
+          });
+        });
+      }
       _loadRelatedMemories(memory);
     }
 
@@ -3096,6 +3271,13 @@
                       : `<button onclick="SettingsScreen.registerBiometric()" class="btn btn-primary text-xs py-1.5 px-3">🫆 등록</button>`
                     }
                   </div>
+<button onclick="SettingsScreen.setupFakePin()" class="w-full text-left flex items-center justify-between p-2 rounded-lg hover:bg-slate-800">
+                    <div>
+                      <span class="text-sm">🎭 스텔스 모드 PIN 설정</span>
+                      <p class="text-xs text-slate-500 mt-0.5">가짜 PIN 입력 시 더미 화면 표시</p>
+                    </div>
+                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-500"></i>
+                  </button>
                   <div class="flex items-center justify-between p-2">
                     <span class="text-sm">암호화 사용</span>
                     <label class="relative inline-flex items-center cursor-pointer">
@@ -3367,6 +3549,43 @@
       }
     }
 
+async function setupFakePin() {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal-box fade-in">
+          <h3 class="text-lg font-bold mb-2">🎭 스텔스 모드 PIN</h3>
+          <p class="text-slate-400 text-sm mb-4">이 PIN 입력 시 무해한 더미 화면이 열립니다</p>
+          <input type="password" id="fake-pin" placeholder="페이크 PIN 6자리" maxlength="6" inputmode="numeric" class="mb-3"/>
+          <div class="flex gap-3 justify-end mt-4">
+            <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">취소</button>
+            <button class="btn btn-danger" onclick="SettingsScreen._clearFakePin(this)">해제</button>
+            <button class="btn btn-primary" onclick="SettingsScreen._saveFakePin(this)">저장</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    }
+
+    async function _saveFakePin(btn) {
+      const overlay = btn.closest('.modal-overlay');
+      const fakePin = overlay.querySelector('#fake-pin').value;
+      if (fakePin.length !== 6) { UI.toast('6자리 PIN을 입력하세요', 'error'); return; }
+      const realHash = await DB.getSetting('pinHash');
+      const fakeHash = await CryptoUtil.hashPin(fakePin);
+      if (fakeHash === realHash) { UI.toast('진짜 PIN과 같은 번호는 사용 불가', 'error'); return; }
+      await DB.setSetting('fakePinHash', fakeHash);
+      overlay.remove();
+      UI.toast('🎭 스텔스 PIN 설정 완료!', 'success');
+    }
+
+    async function _clearFakePin(btn) {
+      await DB.setSetting('fakePinHash', null);
+      btn.closest('.modal-overlay').remove();
+      UI.toast('스텔스 PIN 해제됨', 'info');
+    }
+
     function disableBiometric() {
       UI.confirm('지문인식 해제', '지문인식을 해제하시겠습니까?', async () => {
         localStorage.removeItem('mv_biometric_id');
@@ -3376,7 +3595,296 @@
       });
     }
 
-    return { show, changePin, saveApiKey, saveApiKeys, exportData, clearData, lock, registerBiometric, disableBiometric };
+    return { show, changePin, saveApiKey, saveApiKeys, exportData, clearData, lock, registerBiometric, disableBiometric, setupFakePin, _saveFakePin, _clearFakePin };
+  })();
+  </script>
+
+<!-- ==================== SCREEN: FAKE HOME (스텔스모드) ==================== -->
+  <script>
+  window.FakeHomeScreen = (() => {
+    // 완전 무해한 더미 데이터 (실제 DB 접근 없음)
+    const FAKE = [
+      { title:'이번 주 장볼 것들', content:'계란, 우유, 두부, 상추, 파프리카, 세제', createdAt: new Date(Date.now()-7200000).toISOString() },
+      { title:'오늘 날씨 일기', content:'날씨가 정말 좋았다. 산책도 하고 기분 좋은 하루였다.', createdAt: new Date(Date.now()-86400000).toISOString() },
+      { title:'읽고 싶은 책 목록', content:'1. 아몬드  2. 채식주의자  3. 82년생 김지영', createdAt: new Date(Date.now()-172800000).toISOString() },
+      { title:'주간 운동 기록', content:'월: 러닝 30분 / 수: 수영 1시간 / 금: 헬스 45분', createdAt: new Date(Date.now()-259200000).toISOString() },
+      { title:'엄마한테 물어볼 것', content:'추석 일정 확인, 김치 담그는 법 배우기', createdAt: new Date(Date.now()-3600000).toISOString() },
+    ];
+    function show() {
+      AppState.set('currentScreen', 'home');
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        ${NavBar.render('나의 노트')}
+        <div class="pb-24 nav-content-offset fade-in">
+          <div class="p-4">
+            <h1 class="text-xl font-bold mb-1">📒 나의 노트</h1>
+            <p class="text-slate-400 text-xs mb-4">개인 메모 모음</p>
+            <div class="grid grid-cols-3 gap-3 mb-4">
+              <div class="card text-center"><div class="text-2xl font-bold text-indigo-400">5</div><div class="text-xs text-slate-400">메모</div></div>
+              <div class="card text-center"><div class="text-2xl font-bold text-purple-400">3</div><div class="text-xs text-slate-400">카테고리</div></div>
+              <div class="card text-center"><div class="text-2xl font-bold text-pink-400">1</div><div class="text-xs text-slate-400">중요</div></div>
+            </div>
+            ${FAKE.map(m => `
+              <div class="card mb-2">
+                <p class="font-medium text-sm mb-1">📝 ${_escapeHtml(m.title)}</p>
+                <p class="text-xs text-slate-400 truncate">${_escapeHtml(m.content)}</p>
+                <p class="text-xs text-slate-500 mt-1">${UI.formatDate(m.createdAt)}</p>
+              </div>
+            `).join('')}
+          </div>
+          <div class="tab-bar">
+            <div class="tab-item active"><span style="font-size:20px">🏠</span><span>홈</span></div>
+            <div class="tab-item"><span style="font-size:20px">📂</span><span>폴더</span></div>
+            <div class="tab-item" onclick="FakeHomeScreen.exitStealth()"><span style="font-size:20px">🔒</span><span>잠금</span></div>
+          </div>
+        </div>
+      `;
+      UI.refreshIcons();
+    }
+    function exitStealth() {
+      AppState.set('isStealthMode', false);
+      AppState.set('isLocked', true);
+      AppState.set('pin', null);
+      LockScreen.show();
+    }
+    return { show, exitStealth };
+  })();
+  </script>
+
+  <!-- ==================== SCREEN: MY GHOST AI ==================== -->
+  <script>
+  window.GhostScreen = (() => {
+    let _history = [];
+    let _ctx = '';
+
+    async function show() {
+      AppState.set('currentScreen', 'ghost');
+      const memories = await DB.getAllMemories();
+      _history = [];
+      _ctx = memories.slice(0, 25).map(m =>
+        `[${m.type}] ${m.title}: ${(m.content||'').substring(0, 180)}`
+      ).join('\n---\n');
+
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        ${NavBar.render('👻 나의 고스트')}
+        <div style="display:flex;flex-direction:column;height:100vh;padding-top:calc(44px + env(safe-area-inset-top));padding-bottom:calc(76px + env(safe-area-inset-bottom));">
+          <div style="padding:8px 16px;background:#1e293b;border-bottom:1px solid #334155;">
+            <p style="font-size:12px;color:#a5b4fc;margin:0;">기억 ${memories.length}개 기반 · 당신처럼 생각하는 AI 분신</p>
+          </div>
+          <div id="ghost-chat" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;">
+            <div style="align-self:flex-start;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.2);border-radius:16px 16px 16px 4px;padding:12px 14px;max-width:85%;font-size:13px;color:#a5b4fc;line-height:1.7;">
+              👋 안녕하세요. 저는 당신의 기억을 바탕으로 만들어진 AI 분신입니다. 무엇이든 물어보세요.
+            </div>
+          </div>
+          <div style="position:fixed;bottom:0;left:0;right:0;background:#1e293b;border-top:1px solid #334155;padding:10px 16px;padding-bottom:max(10px,env(safe-area-inset-bottom));">
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="text" id="ghost-input" placeholder="과거의 나에게 질문하기..." style="flex:1;border-radius:20px;padding:10px 16px;font-size:14px;"/>
+              <button id="ghost-send" style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);border:none;color:white;font-size:22px;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;">↑</button>
+            </div>
+          </div>
+        </div>
+      `;
+      _bindChat();
+    }
+
+    function _bubble(text, isUser) {
+      const chat = document.getElementById('ghost-chat');
+      if (!chat) return;
+      const d = document.createElement('div');
+      d.style.cssText = isUser
+        ? 'align-self:flex-end;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;border-radius:16px 16px 4px 16px;padding:10px 14px;max-width:80%;font-size:13px;line-height:1.7;'
+        : 'align-self:flex-start;background:#1e293b;border:1px solid #334155;color:#e2e8f0;border-radius:16px 16px 16px 4px;padding:10px 14px;max-width:80%;font-size:13px;line-height:1.7;';
+      d.textContent = text;
+      chat.appendChild(d);
+      chat.scrollTop = chat.scrollHeight;
+      return d;
+    }
+
+    function _bindChat() {
+      const input = document.getElementById('ghost-input');
+      const sendBtn = document.getElementById('ghost-send');
+      if (!input || !sendBtn) return;
+      const send = async () => {
+        const q = input.value.trim();
+        if (!q) return;
+        input.value = '';
+        _bubble(q, true);
+        _history.push({ role:'user', text: q });
+        if (!AppState.get('geminiApiKey')) { _bubble('Gemini API 키가 필요합니다. 설정에서 등록하세요.', false); return; }
+        const typing = _bubble('💭 생각 중...', false);
+        try {
+          const hist = _history.slice(-6).map(h => `${h.role==='user'?'질문':'답변'}: ${h.text}`).join('\n');
+          const ans = await AbacusAI.callLLM(
+            `당신은 아래 기억 데이터의 주인공 AI 분신입니다. 1인칭으로 3~5문장 자연스럽게 답하세요.\n\n[기억]\n${_ctx}\n\n[이전대화]\n${hist}\n\n[질문]\n${q}`,
+            '사용자처럼 말하는 AI 분신. 1인칭, 자연스럽게.'
+          );
+          if (typing) typing.remove();
+          const reply = ans || '잘 모르겠어요. 다시 물어봐 주세요.';
+          _bubble(reply, false);
+          _history.push({ role:'ghost', text: reply });
+        } catch(e) {
+          if (typing) typing.remove();
+          _bubble('오류가 발생했어요. 다시 시도해주세요.', false);
+        }
+      };
+      sendBtn.addEventListener('click', send);
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+    }
+    return { show };
+  })();
+  </script>
+
+  <!-- ==================== SCREEN: NETWORK MAP (인맥관계도) ==================== -->
+  <script>
+  window.NetworkScreen = (() => {
+    async function show() {
+      AppState.set('currentScreen', 'network');
+      const memories = await DB.getAllMemories();
+      const speakerMap = {};
+      const edges = {};
+
+      // 화자 분리된 음성 메모에서 인물 추출
+      for (const m of memories) {
+        if (m.type !== 'voice' || !m.content || !m.content.trim().startsWith('[')) continue;
+        try {
+          const segs = JSON.parse(m.content);
+          if (!Array.isArray(segs)) continue;
+          const speakers = [...new Set(segs.map(s => s.speaker).filter(Boolean))];
+          speakers.forEach(sp => { speakerMap[sp] = (speakerMap[sp]||0) + 1; });
+          for (let i = 0; i < speakers.length; i++) {
+            for (let j = i+1; j < speakers.length; j++) {
+              const key = [speakers[i], speakers[j]].sort().join('|||');
+              edges[key] = (edges[key]||0) + 1;
+            }
+          }
+        } catch(e) {}
+      }
+
+      const nodes = Object.keys(speakerMap);
+      const edgeList = Object.entries(edges).map(([k,c]) => ({ src: k.split('|||')[0], dst: k.split('|||')[1], count: c }));
+      const voiceCount = memories.filter(m => m.type==='voice').length;
+
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        ${NavBar.render('🕸️ 인맥 관계도')}
+        <div style="padding-top:calc(44px + env(safe-area-inset-top));height:100vh;display:flex;flex-direction:column;">
+          <div style="padding:8px 16px;background:#1e293b;border-bottom:1px solid #334155;font-size:12px;color:#64748b;">
+            ${nodes.length}명 분석 · 통화 ${voiceCount}건
+          </div>
+          ${nodes.length < 2 ? `
+            <div style="flex:1;display:flex;align-items:center;justify-content:center;text-align:center;padding:40px;color:#64748b;">
+              <div><div style="font-size:56px;margin-bottom:16px">🕸️</div>
+              <p style="font-size:14px;">화자 분리된 음성 메모가 2개 이상 필요합니다</p>
+              <p style="font-size:12px;margin-top:8px;color:#334155;">음성 녹음 → 저장 → 자동 대본 변환 후 이용 가능</p></div>
+            </div>
+          ` : `
+            <canvas id="net-canvas" style="flex:1;width:100%;touch-action:none;"></canvas>
+            <div id="net-info" style="display:none;position:fixed;bottom:20px;left:12px;right:12px;background:#1e293b;border:1px solid #6366f1;border-radius:12px;padding:12px;font-size:13px;z-index:10;"></div>
+          `}
+        </div>
+      `;
+
+      if (nodes.length >= 2) _draw(nodes, edgeList, speakerMap);
+    }
+
+    function _draw(nodes, edgeList, speakerMap) {
+      const cvs = document.getElementById('net-canvas');
+      if (!cvs) return;
+      const ctx = cvs.getContext('2d');
+      cvs.width = cvs.offsetWidth;
+      cvs.height = cvs.offsetHeight;
+      const W = cvs.width, H = cvs.height;
+      const cx = W/2, cy = H/2;
+      const R = Math.min(W, H) * 0.33;
+      let hovered = null;
+
+      // 노드 위치 계산 (원형 배치)
+      const pos = {};
+      nodes.forEach((n, i) => {
+        const a = (i/nodes.length) * Math.PI * 2 - Math.PI/2;
+        pos[n] = { x: cx + Math.cos(a)*R, y: cy + Math.sin(a)*R };
+      });
+
+      function render() {
+        ctx.clearRect(0, 0, W, H);
+        ctx.fillStyle = '#0f172a'; ctx.fillRect(0, 0, W, H);
+
+        // 엣지 (연결선)
+        edgeList.forEach(e => {
+          const s = pos[e.src], t = pos[e.dst];
+          if (!s || !t) return;
+          ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y);
+          ctx.strokeStyle = `rgba(99,102,241,${Math.min(0.9, 0.15 + e.count*0.2)})`;
+          ctx.lineWidth = Math.min(5, 1 + e.count * 0.6); ctx.stroke();
+          // 통화횟수 라벨
+          ctx.fillStyle = '#475569'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText(`${e.count}회`, (s.x+t.x)/2, (s.y+t.y)/2 - 4);
+        });
+
+        // 노드
+        nodes.forEach(n => {
+          const p = pos[n]; if (!p) return;
+          const isMe = n === '나';
+          const r = isMe ? 30 : 22;
+          const isHov = hovered === n;
+          if (isHov) { ctx.shadowColor = '#6366f1'; ctx.shadowBlur = 24; }
+          ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2);
+          const g = ctx.createRadialGradient(p.x-4, p.y-4, 2, p.x, p.y, r);
+          g.addColorStop(0, isMe ? '#818cf8' : '#475569');
+          g.addColorStop(1, isMe ? '#4338ca' : '#1e293b');
+          ctx.fillStyle = g; ctx.fill();
+          ctx.strokeStyle = isHov ? '#a5b4fc' : (isMe ? '#6366f1' : '#334155');
+          ctx.lineWidth = isHov ? 3 : 2; ctx.stroke();
+          ctx.shadowBlur = 0;
+          // 이름
+          const short = n.length > 5 ? n.slice(0,5)+'…' : n;
+          ctx.fillStyle = '#f1f5f9'; ctx.font = `${isMe?'bold ':''}11px sans-serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(short, p.x, p.y);
+          // 빈도 뱃지
+          ctx.fillStyle = '#64748b'; ctx.font = '9px sans-serif'; ctx.textBaseline = 'alphabetic';
+          ctx.fillText(`${speakerMap[n]||0}회`, p.x, p.y + r + 12);
+        });
+      }
+
+      render();
+
+      function hitTest(x, y) {
+        for (const n of nodes) {
+          const p = pos[n]; if (!p) continue;
+          if (Math.hypot(x-p.x, y-p.y) <= (n==='나'?30:22)+6) return n;
+        }
+        return null;
+      }
+
+      function handleTap(x, y) {
+        const n = hitTest(x, y);
+        hovered = n; render();
+        const info = document.getElementById('net-info');
+        if (!info) return;
+        if (n) {
+          const rels = edgeList.filter(e => e.src===n||e.dst===n).map(e => e.src===n?e.dst:e.src);
+          info.style.display = 'block';
+          info.innerHTML = `<strong style="color:#a5b4fc;font-size:14px;">${n}</strong> <span style="color:#64748b;font-size:11px;">총 ${speakerMap[n]||0}회 등장</span><br><span style="color:#94a3b8;font-size:12px;">연결: ${rels.length > 0 ? rels.join(', ') : '없음'}</span>`;
+        } else {
+          info.style.display = 'none';
+        }
+      }
+
+      // 클릭 & 터치 (갤럭시 터치 최적화)
+      cvs.addEventListener('click', (e) => {
+        const r = cvs.getBoundingClientRect();
+        handleTap(e.clientX - r.left, e.clientY - r.top);
+      });
+      cvs.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        const t = e.changedTouches[0], r = cvs.getBoundingClientRect();
+        handleTap(t.clientX - r.left, t.clientY - r.top);
+      }, { passive: false });
+    }
+
+    return { show };
   })();
   </script>
 
@@ -3436,6 +3944,9 @@
           else FolderListScreen.show();
           break;
         case 'settings': SettingsScreen.show(); break;
+        case 'ghost': GhostScreen.show(); break;
+        case 'network': NetworkScreen.show(); break;
+        case 'fakeHome': FakeHomeScreen.show(); break;
         default: HomeScreen.show();
       }
     }
