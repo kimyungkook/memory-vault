@@ -1139,16 +1139,15 @@
 
     // ── 눈 아이콘 토글 ──
     function _togglePinVisibility() {
-      const input = document.getElementById('pin-input');
-      const btn   = document.getElementById('pin-eye-btn');
-      if (!input || !btn) return;
-      const isHidden = input.type === 'password';
-      input.type = isHidden ? 'text' : 'password';
-      const icon = btn.querySelector('i[data-lucide]');
-      if (icon) {
-        icon.setAttribute('data-lucide', isHidden ? 'eye-off' : 'eye');
-        if (window.lucide) lucide.createIcons();
-      }
+      var inp = document.getElementById('pin-input');
+      var btn = document.getElementById('pin-eye-btn');
+      if (!inp || !btn) return;
+      var nowHidden = inp.type === 'password';
+      inp.type = nowHidden ? 'text' : 'password';
+      // Lucide가 <i>를 <svg>로 교체하므로 innerHTML로 재생성
+      btn.innerHTML = nowHidden
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
     }
 
     return { show, quickRecord, _togglePinVisibility, _padInput, _padDelete };
@@ -2604,7 +2603,8 @@
       }
       const model = AppState.get('groqSttModel') || 'whisper-large-v3';
       const formData = new FormData();
-      formData.append('file', audioBlob, 'audio.webm');
+      var _fn = (audioBlob instanceof File && audioBlob.name) ? audioBlob.name : 'audio.webm';
+      formData.append('file', audioBlob, _fn);
       formData.append('model', model);
       formData.append('language', 'ko');
       formData.append('response_format', 'verbose_json');
@@ -2631,40 +2631,113 @@
    * 3가지 경로 모두 이 함수 하나로 처리
    */
  window.convertToScript = async function(memoryId, audioSource, title, segments, existingText) {
-  const geminiKey = AppState.get('geminiApiKey');
-  let textToUse = existingText || '';
-  let segsToUse = Array.isArray(segments) ? segments : [];
+    var groqKey   = AppState.get('groqApiKey');
+    var geminiKey = AppState.get('geminiApiKey');
+    var textToUse = existingText || '';
+    var segsToUse = (Array.isArray(segments) && segments.length > 0) ? segments : [];
 
-  // 1. 세그먼트 데이터가 없으면 기본 텍스트로 임시 세그먼트 생성
-  if (segsToUse.length === 0 && textToUse) {
-    segsToUse = [{ start: 0.0, text: textToUse }];
-  }
-  if (segsToUse.length === 0) return;
-
-  // 2. [핵심] API 실패를 대비하여 먼저 무조건 '화자' 이름으로 대본 JSON 생성 후 DB 즉시 저장
-  let baseScript = segsToUse.map(s => ({ speaker: '화자', text: (s.text||'').trim(), start: s.start }));
-  await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) });
-
-  // 3. Gemini API가 등록되어 있다면 화자 분석(Diarization) 요청
-  if (geminiKey) {
-    try {
-      const segData = JSON.stringify(baseScript);
-      const prompt = `당신은 대본 전문가입니다. 아래 통화 세그먼트를 보고 '화자'를 알맞은 이름(예: 나, 상대방, ${title} 등)으로 변경해주세요. 절대 텍스트나 시간을 누락하지 마세요. 출력은 반드시 순수 JSON 배열만 반환하세요.\n\n세그먼트:\n${segData}`;
-      
-      const result = await AbacusAI.callLLM(prompt, '순수 JSON 배열만 반환. 설명 없음.');
-      if (result) {
-        const clean  = result.replace(/```json|```/g, '').trim();
-        const parsed = JSON.parse(clean);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          // Gemini가 성공적으로 분석하면 덮어쓰기
-          await DB.updateMemory(memoryId, { content: JSON.stringify(parsed) });
+    // ── Step1: segments 없고 오디오 있으면 Groq 재호출 ──
+    if (segsToUse.length === 0 && audioSource && groqKey) {
+      try {
+        var _blob;
+        if (audioSource instanceof Blob) {
+          _blob = audioSource;
+        } else if (typeof audioSource === 'string' && audioSource.indexOf('base64') > -1) {
+          var _arr  = audioSource.split(',');
+          var _mime = (_arr[0].match(/:(.*?);/) || [])[1] || 'audio/webm';
+          var _bstr = atob(_arr[1]);
+          var _u8   = new Uint8Array(_bstr.length);
+          for (var _i = 0; _i < _bstr.length; _i++) _u8[_i] = _bstr.charCodeAt(_i);
+          _blob = new Blob([_u8], { type: _mime });
         }
-      }
-    } catch(e) { 
-      console.warn('[convertToScript] Gemini 오류 발생. 기본 대본 유지:', e); 
+        if (_blob) {
+          var _res = await AbacusAI.transcribeAudio(_blob);
+          if (_res) {
+            if (_res.text && !textToUse) textToUse = _res.text;
+            if (_res.segments && _res.segments.length > 0) segsToUse = _res.segments;
+          }
+        }
+      } catch(e) { console.warn('[Script] Groq 재호출 실패:', e.message); }
     }
-  }
-};
+
+    if (!textToUse && segsToUse.length === 0) return;
+
+    // ── Step2: segments 없으면 문장 단위 분할 ──
+    if (segsToUse.length === 0 && textToUse) {
+      var _sents = textToUse.split(/\.\s+|\n/).filter(function(s){ return s.trim().length > 2; });
+      segsToUse = _sents.length > 1
+        ? _sents.map(function(s, i){ return { start: i * 4.0, text: s.trim() }; })
+        : [{ start: 0.0, text: textToUse.trim() }];
+    }
+
+    // ── Step3: 즉시 기본 대본 저장 (API 실패 대비) ──
+    var baseScript = segsToUse.map(function(s) {
+      return { speaker: '나', text: (s.text || '').trim(), start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0 };
+    }).filter(function(s){ return s.text.length > 0; });
+
+    try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); }
+    catch(e) { console.warn('[Script] 기본 대본 저장 실패:', e); return; }
+
+    if (!geminiKey || baseScript.length === 0) return;
+
+    // ── Step4: Gemini 화자 분리 ──
+    try {
+      var _segInput = segsToUse.map(function(s){
+        return { start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0, text: (s.text||'').trim() };
+      }).filter(function(s){ return s.text.length > 0; });
+
+      var _titleHint = title ? '제목/파일명: "' + title + '"' : '제목 없음';
+      var _cnt = _segInput.length;
+
+      var _sys = '당신은 오직 JSON 배열만 출력하는 시스템입니다. 설명, 마크다운, 코드블록을 절대 출력하지 마세요.';
+      var _usr = '[임무] 한국어 통화/미팅 녹음 세그먼트에서 화자를 분류하여 JSON 배열만 출력하세요.\n\n' +
+        '[정보]\n' + _titleHint + '\n세그먼트 수: ' + _cnt + '개 (반드시 ' + _cnt + '개 모두 포함)\n\n' +
+        '[세그먼트]\n' + JSON.stringify(_segInput) + '\n\n' +
+        '[화자 판별 규칙]\n' +
+        '1. ' + _titleHint + '에서 상대방 이름/직책 추출. 없으면 "상대방" 사용.\n' +
+        '2. "~습니다", "~해요", "~드릴게요" → 일반적으로 발신자(나)\n' +
+        '3. 짧은 대답, 지시, 질문 먼저 → 일반적으로 상대방\n' +
+        '4. 연속된 같은 맥락 → 같은 화자 유지\n' +
+        '5. 세그먼트를 하나도 빠뜨리지 마세요\n\n' +
+        '[출력 규칙] 순수 JSON 배열만. 예외 없음.\n' +
+        '[출력 예시] [{"speaker":"나","text":"안녕하세요","start":0.0},{"speaker":"신무용과장","text":"어, 그래","start":3.2}]';
+
+      var _raw = await AbacusAI.callLLM(_usr, _sys);
+      if (!_raw) return;
+
+      // JSON 추출 (마크다운 제거)
+      var _clean = _raw.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```\s*$/,'').trim();
+      var _s = _clean.indexOf('['), _e = _clean.lastIndexOf(']');
+      if (_s < 0 || _e < 0 || _e <= _s) { console.warn('[Script] JSON 배열 없음'); return; }
+      _clean = _clean.slice(_s, _e + 1);
+
+      var _parsed = JSON.parse(_clean);
+      if (!Array.isArray(_parsed) || _parsed.length === 0) return;
+
+      // 유효성 검사
+      var _valid = _parsed.filter(function(item){
+        return item && typeof item.speaker === 'string' && item.speaker.length > 0
+          && typeof item.text === 'string' && item.text.trim().length > 0;
+      });
+      if (_valid.length === 0) return;
+
+      // start 값 보정
+      _valid.forEach(function(item, i){
+        if (typeof item.start !== 'number' || isNaN(item.start)) {
+          item.start = _segInput[i] ? _segInput[i].start : i * 3.0;
+        }
+        item.start = Math.round(item.start * 10) / 10;
+        item.text  = item.text.trim();
+      });
+
+      await DB.updateMemory(memoryId, { content: JSON.stringify(_valid) });
+      console.log('[Script] ✅ 화자분리 완료:', _valid.length + '개 세그먼트');
+
+    } catch(err) {
+      console.warn('[Script] Gemini 분석 실패. 기본 대본(나) 유지:', err.message || err);
+    }
+  };
+  </script>
 
   <!-- ==================== SCREEN: ALL MEMORIES ==================== -->
   <script>
@@ -2955,7 +3028,7 @@
         document.querySelectorAll('.seg-text').forEach(el => {
           el.addEventListener('blur', async () => {
             const idx = parseInt(el.dataset.idx);
-            const newText = el.textContent.trim();
+            const newText = (el.tagName === 'TEXTAREA' ? el.value : el.textContent).trim();
             if (!_liveSegs[idx] || _liveSegs[idx].text === newText) return;
             _liveSegs[idx].text = newText;
             await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
@@ -3127,6 +3200,7 @@
 window.FolderListScreen = (() => {
   const COLORS = ['#6366f1', '#ec4899', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#8b5cf6', '#f97316'];
   const ICONS = ['folder', 'heart', 'star', 'bookmark', 'briefcase', 'camera', 'music', 'book-open'];
+  const ICON_EMOJIS = { 'folder':'📁', 'heart':'❤️', 'star':'⭐', 'bookmark':'🔖', 'briefcase':'💼', 'camera':'📷', 'music':'🎵', 'book-open':'📖' };
 
   function _hexToRgba(hex, alpha) {
     if(!hex) return `rgba(99,102,241,${alpha})`;
@@ -3152,8 +3226,8 @@ window.FolderListScreen = (() => {
         <div class="px-4" id="folder-list">
           ${folders.length ? folders.map(f => `
             <div class="card mb-2 flex items-center gap-3 cursor-pointer" onclick="FolderListScreen.openFolder(${f.id})">
-              <div class="w-10 h-10 rounded-lg flex items-center justify-center" style="background:${_hexToRgba(f.color, 0.2)}">
-                <i data-lucide="${f.icon || 'folder'}" class="w-5 h-5" style="color:${f.color || '#6366f1'}"></i>
+              <div class="w-10 h-10 rounded-lg flex items-center justify-center" style="background:${f.color||'#6366f1'};border-radius:10px;">
+                <span style="font-size:20px;line-height:1;">${ICON_EMOJIS[f.icon]||'📁'}</span>
               </div>
               <div class="flex-1">
                 <p class="font-medium text-sm">${_escapeHtml(f.name)}</p>
@@ -3195,7 +3269,7 @@ window.FolderListScreen = (() => {
             <div>
               <label class="text-sm text-slate-400 mb-1 block">아이콘</label>
               <div class="flex gap-2 flex-wrap">
-                ${ICONS.map((ic, i) => `<button class="w-8 h-8 rounded-lg bg-slate-700 flex items-center justify-center icon-pick ${i === 0 ? 'ring-2 ring-indigo-400' : ''}" data-icon="${ic}"><i data-lucide="${ic}" class="w-4 h-4"></i></button>`).join('')}
+               ${ICONS.map(function(ic, i) { return '<button class="w-8 h-8 rounded-lg flex items-center justify-center icon-pick ' + (i === 0 ? 'ring-2 ring-indigo-400 ' : '') + '" data-icon="' + ic + '" style="background:#334155;font-size:18px;cursor:pointer;transition:all 0.15s;border:1px solid #475569;">' + (ICON_EMOJIS[ic]||'📁') + '</button>'; }).join('')}
               </div>
             </div>
           </div>
@@ -3249,8 +3323,8 @@ window.FolderListScreen = (() => {
         ${NavBar.render(folder.name)}
         <div class="pb-24 nav-content-offset fade-in">
           <div class="p-4 flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background:${folder.color}20">
-              <i data-lucide="${folder.icon || 'folder'}" class="w-4 h-4" style="color:${folder.color}"></i>
+            <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background:${folder.color||'#6366f1'};border-radius:8px;">
+              <span style="font-size:16px;line-height:1;">${ICON_EMOJIS[folder.icon]||'📁'}</span>
             </div>
             <h2 class="text-lg font-bold">${_escapeHtml(folder.name)}</h2>
             <span class="text-slate-400 text-sm">(${memories.length})</span>
@@ -3724,18 +3798,16 @@ async function setupFakePin() {
     }
 
     function toggleVisibility(inputId, btn) {
-      const input = document.getElementById(inputId);
-      if (!input) return;
-      const show = input.type === 'password';
-      input.type = show ? 'text' : 'password';
-      const icon = btn.querySelector('i[data-lucide]');
-      if (icon) {
-        icon.setAttribute('data-lucide', show ? 'eye-off' : 'eye');
-        if (window.lucide) lucide.createIcons();
-      }
+      var inp = document.getElementById(inputId);
+      if (!inp) return;
+      var nowHidden = inp.type === 'password';
+      inp.type = nowHidden ? 'text' : 'password';
+      btn.innerHTML = nowHidden
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
     }
 
-    return { show, changePin, saveApiKey, saveApiKeys, exportData, clearData, lock, registerBiometric, disableBiometric, setupFakePin, _saveFakePin, _clearFakePin, toggleVisibility };
+    return { show, changePin, saveApiKey, saveApiKeys, exportData, exportText, clearData, lock, registerBiometric, disableBiometric, setupFakePin, _saveFakePin, _clearFakePin, toggleVisibility };
   })();
   </script>
 
