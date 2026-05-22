@@ -2954,54 +2954,13 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     }
 
 // [초고도화 1단계 v2.0] 바이오메트릭 앵커 기반 패턴 매칭 화자 분리 엔진
+    // ── Step 0: DB에서 사용자 프로필 먼저 로드 (선언 순서 버그 수정) ──
+    const userVoiceBio  = await DB.getSetting('userVoiceBio')  || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
+    const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 사용';
+
     // ── Step A: userVoiceBio + userVoiceTone으로 "나"의 키워드 사전 자동 구축 ──
     const _extractMyKeywords = (bio, tone) => {
       const kws = { names: [], endings: [], roles: [] };
-      if (bio) {
-        const nameM  = bio.match(/이름:\s*([^\n]+)/);
-        const jobM   = bio.match(/직장:\s*([^\n]+)/);
-        const wifeM  = bio.match(/와이프\s+([^(,\n]+)/);
-        const kidM   = bio.match(/딸\s+([^(,\n]+)/);
-        if (nameM)  kws.names.push(nameM[1].trim());
-        if (jobM)   kws.roles.push(...jobM[1].split(/[,，\s]/).map(s=>s.trim()).filter(Boolean));
-        if (wifeM)  kws.names.push('자기','자기야', wifeM[1].trim());
-        if (kidM) {
-          const kid = kidM[1].trim().replace(/\s*\([^)]+\)/, '');
-          kws.names.push(kid.replace(/^김/,''), kid+'아', kid+'야');
-        }
-      }
-      if (tone) {
-        (tone.match(/'([^']+)'/g)||[]).forEach(q => {
-          const w = q.replace(/'/g,'').trim();
-          if (w) kws.endings.push(w);
-        });
-      }
-      return kws;
-    };
-
-    // ── Step B: 개별 세그먼트에 대해 "나" 일치 점수 산출 ──
-    const _scoreAsMe = (text, kws) => {
-      if (!text) return 0;
-      let score = 0;
-      const t = text.toLowerCase();
-      kws.names.forEach(n   => { if (t.includes(n.toLowerCase())) score += 3; });
-      kws.endings.forEach(e => { if (t.includes(e.toLowerCase())) score += 2; });
-      kws.roles.forEach(r   => { if (t.includes(r.toLowerCase())) score += 1; });
-      return score;
-    };
-
-    // ── Step C: 핑퐁(질문→대답) 전환 감지 ──
-    const _isPingPong = (prev, curr) => {
-      const prevQ    = /[?？]/.test(prev);
-      const shortAck = curr.length < 20 && /^(네|예|아|어|응|맞|그렇|알겠|저도|저는|나는|우리|넵)/.test(curr);
-      const longToShort = prev.length > 50 && curr.length < 30;
-      return prevQ || shortAck || longToShort;
-    };
-
-    // ── Step D: 앵커 사전 생성 ──
-    const myKeywords = _extractMyKeywords(userVoiceBio, userVoiceTone);
-
-    let currentLocalSpeaker = '나';
     var baseScript = segsToUse.map(function(s, i) {
       const textVal = (s.text || '').trim();
       if (!textVal) return null;
@@ -3065,8 +3024,8 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     // 만약 제미니 키가 없다면 여기서 로컬 필터 대본으로 자동 수용하고 종료
     if (!geminiKey || baseScript.length === 0) return;
 
-    const userVoiceBio = await DB.getSetting('userVoiceBio') || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
-    const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 사용';
+    try {
+      var _segInput = segsToUse.map(function(s){
 
     // ── 변환 중 화면잠금 방지 wakeLock 획득 ──
     let _convWakeLock = null;
@@ -4065,12 +4024,12 @@ window.FolderListScreen = (() => {
                     <label class="text-xs text-slate-400 mb-1 block">Gemini 텍스트 생성 모델 (한국어)</label>
                     <select id="gemini-model">
                       <option value="gemini-3.5-flash" ${(geminiModel === 'gemini-3.5-flash' || !geminiModel) ? 'selected' : ''}>🌟 Gemini 3.5 Flash (최신 · 무료 · 권장)</option>
-                      <option value="gemini-3-flash" ${geminiModel === 'gemini-3-flash' ? 'selected' : ''}>⚡ Gemini 3 Flash (안정 · 무료)</option>
-                      <option value="gemini-3.1-flash-lite-preview" ${(geminiModel === 'gemini-3.1-flash-lite-preview' || geminiModel === 'gemini-3.1-flash-lite') ? 'selected' : ''}>🪶 Gemini 3.1 Flash-Lite (경량 · 무료)</option>
+                      <option value="gemini-3-flash-preview" ${(geminiModel === 'gemini-3-flash-preview' || geminiModel === 'gemini-3-flash') ? 'selected' : ''}>⚡ Gemini 3 Flash Preview (안정 · 무료)</option>
+                      <option value="gemini-3.1-flash-lite" ${(geminiModel === 'gemini-3.1-flash-lite' || geminiModel === 'gemini-3.1-flash-lite-preview') ? 'selected' : ''}>🪶 Gemini 3.1 Flash-Lite (경량 · 무료)</option>
                       <option value="gemini-2.5-flash-preview-05-20" ${geminiModel === 'gemini-2.5-flash-preview-05-20' ? 'selected' : ''}>🔋 Gemini 2.5 Flash Preview</option>
                       <option value="gemini-3.1-pro-preview" ${geminiModel === 'gemini-3.1-pro-preview' ? 'selected' : ''}>💎 Gemini 3.1 Pro (유료전용)</option>
                     </select>
-                    <p class="text-xs text-slate-500 mt-1">🟢 무료: 3.5 Flash · 3 Flash · 3.1 Flash-Lite · 2.5 Flash | 🔴 유료: 3.1 Pro</p>
+                    <p class="text-xs text-slate-500 mt-1">🟢 무료: 3.5 Flash · 3 Flash Preview · 3.1 Flash-Lite | 🔴 유료: 3.1 Pro</p>
                   </div>
                   <div>
                     <label class="text-xs text-slate-400 mb-1 block">Groq 음성 인식 모델 (한국어)</label>
