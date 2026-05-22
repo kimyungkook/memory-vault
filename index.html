@@ -2979,7 +2979,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       for (let offset = 0; offset < _cnt; offset += CHUNK_SIZE) {
         let chunk = _segInput.slice(offset, offset + CHUNK_SIZE);
         
-        var _sys = '당신은 오직 완벽한 JSON 배열만 출력하는 시스템입니다. 부연 설명, 마크다운 코드블록(```json 등)을 절대 적지 말고 오직 순수 JSON 데이터만 출력하세요.';
+       var _sys = '당신은 오직 완벽한 JSON 배열만 출력하는 시스템입니다. 부연 설명, 마크다운 코드블록(```json 등)을 절대 적지 말고 오직 순수 JSON 데이터만 출력하세요.';
         var _usr = '[임무] 주어진 대화 데이터의 화자를 "나(김용국)"와 "' + counterpartName + '"로 정확하게 이분화하여 분류하세요.\n' +
           '원본의 대화 ' + chunk.length + '개 항목 전체를 누락 없이 완벽한 JSON 배열 구조로 반환하십시오.\n\n' +
           '[화자 구별 기준 ("나"의 인적 이력)]\n' +
@@ -2987,9 +2987,10 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
           '- 습관/성향/종결어미: ' + userVoiceTone + '\n\n' +
           '[상대방 디폴트 명칭]\n' +
           '- 이름: ' + counterpartName + '\n\n' +
-          '[분석 원칙]\n' +
-          '1. 대화 진행 맥락상 자재 납품, 캐리어 테이프 견적, 와이프(자기), 딸(김하은/사춘기), 넥스팩 관련 언급이 나오거나 수평적 팀장/부장의 지시조 발언은 화자를 "나"로 지정하세요.\n' +
-          '2. 상대방은 무조건 "' + counterpartName + '"으로 균일하게 매핑해 주십시오.\n\n' +
+          '[⚠️ 화자 이분화 및 교대 발화 필수 규칙]\n' +
+          '1. 주어진 대화 세그먼트들은 절대 "나" 혼자서 말하는 독백이 아닙니다. 서로 묻고 답하는 인터랙티브한 쌍방향 통화입니다.\n' +
+          '2. 문맥을 예리하게 분석하여, "~했어?", "식사 중이세요?", "알아봐야겠네" 등 질문을 던지는 주체와 답하는 주체를 가려내어 반드시 "나"와 "' + counterpartName + '"를 번갈아가며 조화롭게 배분하세요.\n' +
+          '3. 모든 발화자가 "나" 한 명으로 도배되는 오류는 심각한 오답입니다. 상대방의 말은 반드시 "' + counterpartName + '" 화자로 분리 배정하십시오.\n\n' +
           '[출력 데이터 형태] 순수 JSON 배열만.\n' +
           '[분석할 데이터 수량] ' + chunk.length + '개\n' +
           '[입력 데이터]\n' + JSON.stringify(chunk);
@@ -3235,16 +3236,35 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
             const m = Math.floor((s||0)/60), sec = Math.floor((s||0)%60);
             return String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
           };
-          _contentHtml = `<div id="script-view" style="display:flex;flex-direction:column;gap:8px;">
-            ${_liveSegs.map((seg, i) => `
-              <div style="display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;background:#0f172a;border:1px solid #1e293b;box-shadow:inset 0 2px 4px rgba(0,0,0,0.2);">
-                <button class="spk-btn" data-idx="${i}" style="min-width:60px;max-width:80px;padding:4px 6px;border-radius:8px;background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.4);color:#a5b4fc;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0;text-align:center;-webkit-user-select:none;transition:all 0.2s;">${_escapeHtml(seg.speaker||'화자')}</button>
-                <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
-                  <span style="font-size:10px;color:#64748b;margin-bottom:4px;">${_fmt(seg.start)}</span>
-                  <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%;font-size:14px;color:#f8fafc;line-height:1.6;background:transparent;border:none;border-bottom:1px dashed transparent;outline:none;resize:none;overflow:hidden;padding:0;transition:border-color 0.2s;" onfocus="this.style.borderBottomColor='#6366f1'" onblur="this.style.borderBottomColor='transparent'" oninput="this.style.height='';this.style.height=this.scrollHeight+'px'">${_escapeHtml(seg.text||'')}</textarea>
+          
+          // [개선] 여러 개의 창이 아닌, 카카오톡 스타일 단일 채팅방 구조 컨테이너
+          _contentHtml = `<div id="chat-room" style="display:flex; flex-direction:column; gap:16px; background:#151e2e; border-radius:16px; padding:18px; border:1px solid #1e293b; box-shadow:inset 0 4px 12px rgba(0,0,0,0.3); width:100%;">
+            ${_liveSegs.map((seg, i) => {
+              const isMe = seg.speaker === '나';
+              return isMe ? `
+                <!-- 우측 배치: 나(김용국) 말풍선 -->
+                <div style="display:flex; flex-direction:column; align-items:flex-end; align-self:flex-end; max-width:85%;">
+                  <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
+                    <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
+                    <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#818cf8; background:transparent; border:none; text-align:right; width:60px; outline:none; padding:0;"/>
+                  </div>
+                  <div style="background:#4f46e5; color:#ffffff; border-radius:12px 2px 12px 12px; padding:10px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
+                    <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#ffffff; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
+                  </div>
                 </div>
-              </div>
-            `).join('')}
+              ` : `
+                <!-- 좌측 배치: 상대방 말풍선 -->
+                <div style="display:flex; flex-direction:column; align-items:flex-start; align-self:flex-start; max-width:85%;">
+                  <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
+                    <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#94a3b8; background:transparent; border:none; width:90px; outline:none; padding:0;"/>
+                    <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
+                  </div>
+                  <div style="background:#1e293b; color:#cbd5e1; border-radius:2px 12px 12px 12px; padding:10px 14px; border:1px solid #334155; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
+                    <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#e2e8f0; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
+                  </div>
+                </div>
+              `;
+            }).join('')}
           </div>`;
         }
       } catch(e) { _contentHtml = null; }
@@ -3282,11 +3302,12 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
             ${audioHtml}
             ${docHtml}
 
-            <div class="card" style="padding:16px;">
+            <!-- 카카오톡 테마 단일 대화 패널 -->
+            <div class="w-full">
               ${_contentHtml}
             </div>
             ${memory.tags && memory.tags.length ? `
-              <div class="flex flex-wrap gap-1">
+              <div class="flex flex-wrap gap-1 mt-3">
                 ${memory.tags.map(t => `<span class="tag">${_escapeHtml(t)}</span>`).join('')}
               </div>
             ` : ''}
@@ -3296,30 +3317,18 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       UI.refreshIcons();
 
       if (_liveSegs) {
-        document.querySelectorAll('.spk-btn').forEach(btn => {
-          btn.addEventListener('click', () => {
-            if (btn.dataset.editing === '1') return;
-            btn.dataset.editing = '1';
-            const idx = parseInt(btn.dataset.idx);
-            const cur = _liveSegs[idx].speaker || '화자';
-            btn.innerHTML = `<input style="width:100%;font-size:12px;background:transparent;border:none;outline:1px solid #6366f1;border-radius:4px;color:#fff;text-align:center;padding:2px;" value="${_escapeHtml(cur)}"/>`;
-            const inp = btn.querySelector('input');
-            inp.focus(); inp.select();
-            
-            const commit = async () => {
-              if (btn.dataset.editing === '0') return;
-              btn.dataset.editing = '0';
-              const newName = inp.value.trim() || cur;
-              _liveSegs[idx].speaker = newName;
-              btn.innerHTML = _escapeHtml(newName);
-              try {
-                await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
-                UI.toast('✅ 화자 변경 저장됨', 'success');
-              } catch(e) {}
-            };
-            inp.addEventListener('blur', commit);
-            inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
+        // [수정] 인풋 요소 직접 터치/클릭 즉시 편집 활성화 (가장 부드러운 모바일 입력방식 연동)
+        document.querySelectorAll('.spk-input').forEach(inp => {
+          inp.addEventListener('blur', async () => {
+            const idx = parseInt(inp.dataset.idx);
+            const newName = inp.value.trim();
+            if (!_liveSegs[idx] || _liveSegs[idx].speaker === newName) return;
+            _liveSegs[idx].speaker = newName;
+            try {
+              await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
+            } catch(e) {}
           });
+          inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
         });
 
         document.querySelectorAll('.seg-text').forEach(el => {
@@ -3332,7 +3341,9 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
               await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
             } catch(e) {}
           });
-          el.style.height = el.scrollHeight + 'px';
+          // 로드하자마자 줄높이 정밀 자동 리사이징
+          el.style.height = 'auto';
+          el.style.height = (el.scrollHeight) + 'px';
         });
       }
       _loadRelatedMemories(memory);
