@@ -3052,28 +3052,28 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         return p.length ? '- ' + p.join('\n- ') : '(키워드 프로필 미등록)';
       };
 
-      var _sys = [
-        '당신은 오디오 녹음 및 통화 대화 기록의 화자 분리(Diarization) 전문가입니다.',
-        '전체 대화 내용의 맥락을 논리적으로 연결 및 해석하여, 문장별 화자가 누구인지를 판별하십시오.',
-        '출력값에는 절대로 당신의 임의 부연설명, 안내말, 마크다운(```), JSON 코드 기호 등을 일절 작성하지 마십시오.',
-        '오직 아래 명시된 [출력형식] 가이드 라인 텍스트에만 맞추어 입력받은 행과 1:1로 대응되게 줄바꿈으로 출력해야 합니다.',
+       var _sys = [
+        '당신은 오디오 통화 및 대화 기록의 화자분리(Diarization) 전문가입니다.',
+        '전체 대화의 맥락적 호칭 관계를 정확하게 추적하여 문장별 진짜 발화자를 가려내십시오.',
+        '출력값에는 본인 설명이나 설명글, 마크다운(```), JSON 형식을 절대 붙이지 마십시오.',
+        '오직 아래 명시된 [출력형식] 줄바꿈 형식에만 정확히 맞추어 출력하십시오.',
         '[출력형식] [시작시간] 화자명: 대화내용'
       ].join(' ');
 
       var _usr = [
-        `[수행 지침] 다음 송신 데이터 전체 리스트의 화자를 "나" 또는 상대방인 "${counterpartName}" 중 하나로 판별하십시오.`,
-        `입력된 총 대화의 줄 수(${_segInput.length}개)와 완전히 동일한 응답 줄 수를 출력해 주십시오.`,
+        `[수행 지침] 다음 송신 대화 전체 리스트의 화자를 "나" 또는 상대방인 "${counterpartName}" 중 하나로 판별하십시오.`,
+        `입력된 총 대화 줄 수(${_segInput.length}개)와 완전히 동일한 응답 줄 수를 출력해 주십시오.`,
         '',
-        '━━━ 화자1 "나(김용국)"의 보이스 프로필 정보 ━━━',
+        '━━━ 화자1 "나(김용국)"의 기본 식별 정보 ━━━',
         `[프로필 및 인적사항]\n${userVoiceBio}`,
         `[목소리 특징 및 말투]\n${userVoiceTone}`,
         `[식별 가속화 단어 힌트]\n${_buildKwHints(myKeywords)}`,
         '',
-        '━━━ 추론 및 매칭 가이드라인 규칙 ━━━',
-        '1. 식별 키워드를 말하거나 본인의 세부 이력 정보와 부합하는 말을 한 주체는 최우선적으로 "나"로 할당하십시오.',
-        '2. 상대방의 한글 이름이 호출되거나 "김 부장님", "아빠" 등 외부 호칭이 섞인 문장의 발화자는 상대방("${counterpartName}")으로 판정합니다.',
-        '3. 대화는 대개 핑퐁(상호 교차 발화) 양상을 띠므로, 흐름상의 맥락 구조를 엄밀히 검토해 한 화자가 비상식적으로 혼자 다 말하는 오류를 자동 교정하십시오.',
-        '4. 출력문에는 절대 누락, 축소, 또는 생략 처리를 행하지 마십시오.',
+        '━━━ ⚠️ 화자 결정 핵심 규칙 (대역 왜곡 방지) ━━━',
+        '1. [호칭의 상대성]: 상대방이 본인을 향해 "김 부장님", "김 팀장님", "용국 씨", "하은이 아빠"라고 부르는 문장은 절대 "나"가 한 말이 아닙니다. 나를 부르는 상대방의 말(즉, 상대방의 발화)로 판단해야 합니다.',
+        '2. [답변의 주체성]: 상대방의 부름에 대해 "예 대리님", "어 하은아", "자기야 왜?"라고 호명에 대응하거나 답변하는 문장은 "나"의 발화로 판단해야 합니다.',
+        '3. 식별 가속화 힌트 사전에 등록된 습관적인 종결 어미(넵, 아 예 등)를 구사하는 행위자는 최우선적으로 "나"로 할당하십시오.',
+        '4. 출력문에는 절대 행을 임의로 생략하거나 무단 중도 중단을 가하지 마십시오.',
         '',
         '━━━ 분석 세그먼트 데이터 ━━━',
         JSON.stringify(_segInput)
@@ -3256,13 +3256,13 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
   })();
   </script>
 
-  <!-- ==================== SCREEN: VIEW MEMORY ==================== -->
+   <!-- ==================== SCREEN: VIEW MEMORY ==================== -->
   <script>
   /**
-   * ViewMemoryScreen - View, edit, delete a single memory
+   * ViewMemoryScreen - 화자 일괄 수정 및 좌우 화자 전환 스위치가 보강된 상세 뷰어
    */
   window.ViewMemoryScreen = (() => {
-    let _ttsPlaying = false; // TTS 상태 변수 안전한 위치로 이동
+    let _ttsPlaying = false;
 
     async function show(params = {}) {
       if (!params.id) { App.navigate('home'); return; }
@@ -3276,25 +3276,20 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         catch(e) { displayContent = '[암호화된 내용 - 복호화 실패]'; }
       }
 
-      // Multi-image support
       let imageHtml = '';
       if (memory.imageData) {
         const imgs = Array.isArray(memory.imageData) ? memory.imageData : [memory.imageData];
         imageHtml = imgs.map(img => `<img src="${img}" class="w-full rounded-lg max-h-80 object-contain bg-slate-900 mb-2"/>`).join('');
       }
 
-      // 🚨 Multi-audio support (오디오 플레이어)
       let audioHtml = '';
       if (memory.audioData) {
         const auds = Array.isArray(memory.audioData) ? memory.audioData : [memory.audioData];
-        // 오디오 플레이어 생성
         audioHtml = auds.map(aud => `<audio controls class="w-full mb-3" style="height: 44px; border-radius: 8px;" src="${aud}"></audio>`).join('');
       } else if (memory.type === 'voice') {
-        // 예전 에러 시절에 음성 데이터 없이 텍스트만 저장된 불량 메모를 위한 경고창
         audioHtml = `<div style="padding: 12px; background: rgba(239,68,68,0.15); color: #f87171; border-radius: 8px; font-size: 12px; margin-bottom: 12px;">⚠️ 오디오 데이터가 소실되어 텍스트만 보존된 메모입니다.</div>`;
       }
 
-      // Multi-doc support
       let docHtml = '';
       if (memory.docDataList && Array.isArray(memory.docDataList)) {
         docHtml = memory.docDataList.map((doc, i) => `
@@ -3314,53 +3309,51 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         `;
       }
 
-// ── 대본 뷰어 HTML 사전 계산 ──
-    let _contentHtml = null;
-    let _liveSegs = null;
-    if (memory.type === 'voice' && displayContent && displayContent.trim().startsWith('[')) {
-      try {
-        _liveSegs = JSON.parse(displayContent);
-        if (Array.isArray(_liveSegs) && _liveSegs.length > 0) {
-          const _fmt = (s) => {
-            const m = Math.floor((s||0)/60), sec = Math.floor((s||0)%60);
-            return String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
-          };
-          
-          // [개선] 여러 개의 창이 아닌, 카카오톡 스타일 단일 채팅방 구조 컨테이너
-          _contentHtml = `<div id="chat-room" style="display:flex; flex-direction:column; gap:16px; background:#151e2e; border-radius:16px; padding:18px; border:1px solid #1e293b; box-shadow:inset 0 4px 12px rgba(0,0,0,0.3); width:100%;">
-            ${_liveSegs.map((seg, i) => {
-              const isMe = seg.speaker === '나';
-              return isMe ? `
-                <!-- 우측 배치: 나(김용국) 말풍선 -->
-                <div style="display:flex; flex-direction:column; align-items:flex-end; align-self:flex-end; max-width:85%;">
-                  <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
-                    <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
-                    <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#818cf8; background:transparent; border:none; text-align:right; width:60px; outline:none; padding:0;"/>
+      let _contentHtml = null;
+      let _liveSegs = null;
+      if (memory.type === 'voice' && displayContent && displayContent.trim().startsWith('[')) {
+        try {
+          _liveSegs = JSON.parse(displayContent);
+          if (Array.isArray(_liveSegs) && _liveSegs.length > 0) {
+            const _fmt = (s) => {
+              const m = Math.floor((s||0)/60), sec = Math.floor((s||0)%60);
+              return String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+            };
+            
+            _contentHtml = `<div id="chat-room" style="display:flex; flex-direction:column; gap:16px; background:#151e2e; border-radius:16px; padding:18px; border:1px solid #1e293b; box-shadow:inset 0 4px 12px rgba(0,0,0,0.3); width:100%;">
+              ${_liveSegs.map((seg, i) => {
+                const isMe = seg.speaker === '나';
+                return isMe ? `
+                  <!-- 우측 배치: 나(김용국) 말풍선 -->
+                  <div style="display:flex; flex-direction:column; align-items:flex-end; align-self:flex-end; max-width:85%;">
+                    <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
+                      <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
+                      <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#818cf8; background:transparent; border:none; text-align:right; width:90px; outline:none; padding:0;"/>
+                    </div>
+                    <div style="background:#4f46e5; color:#ffffff; border-radius:12px 2px 12px 12px; padding:10px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
+                      <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#ffffff; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
+                    </div>
                   </div>
-                  <div style="background:#4f46e5; color:#ffffff; border-radius:12px 2px 12px 12px; padding:10px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
-                    <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#ffffff; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
+                ` : `
+                  <!-- 좌측 배치: 상대방 말풍선 -->
+                  <div style="display:flex; flex-direction:column; align-items:flex-start; align-self:flex-start; max-width:85%;">
+                    <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
+                      <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#94a3b8; background:transparent; border:none; width:90px; outline:none; padding:0;"/>
+                      <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
+                    </div>
+                    <div style="background:#1e293b; color:#cbd5e1; border-radius:2px 12px 12px 12px; padding:10px 14px; border:1px solid #334155; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
+                      <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#e2e8f0; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
+                    </div>
                   </div>
-                </div>
-              ` : `
-                <!-- 좌측 배치: 상대방 말풍선 -->
-                <div style="display:flex; flex-direction:column; align-items:flex-start; align-self:flex-start; max-width:85%;">
-                  <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
-                    <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#94a3b8; background:transparent; border:none; width:90px; outline:none; padding:0;"/>
-                    <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
-                  </div>
-                  <div style="background:#1e293b; color:#cbd5e1; border-radius:2px 12px 12px 12px; padding:10px 14px; border:1px solid #334155; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
-                    <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#e2e8f0; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
-                  </div>
-                </div>
-              `;
-            }).join('')}
-          </div>`;
-        }
-      } catch(e) { _contentHtml = null; }
-    }
-    if (!_contentHtml) {
-      _contentHtml = `<p class="text-sm whitespace-pre-wrap leading-relaxed">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>`;
-    }
+                `;
+              }).join('')}
+            </div>`;
+          }
+        } catch(e) { _contentHtml = null; }
+      }
+      if (!_contentHtml) {
+        _contentHtml = `<p class="text-sm whitespace-pre-wrap leading-relaxed">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>`;
+      }
 
       const app = document.getElementById('app');
       app.innerHTML = `
@@ -3397,14 +3390,26 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
               </div>
             </div>
             ` : ''}
-            <button onclick="ViewMemoryScreen.reAnalyze(${memory.id})"
-              style="width:100%;margin-bottom:16px;padding:11px;border-radius:12px;
-                     background:linear-gradient(135deg,rgba(99,102,241,0.2),rgba(139,92,246,0.2));
-                     border:1px solid rgba(99,102,241,0.5);color:#a5b4fc;
-                     font-size:13px;font-weight:600;cursor:pointer;
-                     display:flex;align-items:center;justify-content:center;gap:8px;">
-              🔄 AI 화자분리 재분석 (카카오톡 대화형으로 변환)
-            </button>
+            
+            <!-- 분석 제어 모듈: 재분석 기능과 신규 화자 일괄 뒤바꾸기 스위치 병렬 배치 -->
+            <div style="display:flex; gap:8px; margin-bottom:16px;">
+              <button onclick="ViewMemoryScreen.reAnalyze(${memory.id})"
+                style="flex:1; padding:11px; border-radius:12px;
+                       background:linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.15));
+                       border:1px solid rgba(99,102,241,0.4);color:#a5b4fc;
+                       font-size:12px;font-weight:600;cursor:pointer;
+                       display:flex;align-items:center;justify-content:center;gap:4px;">
+                🔄 AI 화자 재분석
+              </button>
+              <button onclick="ViewMemoryScreen.swapSpeakers(${memory.id})"
+                style="flex:1; padding:11px; border-radius:12px;
+                       background:rgba(245,158,11,0.1);
+                       border:1px solid rgba(245,158,11,0.4);color:#fbbf24;
+                       font-size:12px;font-weight:600;cursor:pointer;
+                       display:flex;align-items:center;justify-content:center;gap:4px;">
+                ↔️ 좌우 화자 뒤바꾸기
+              </button>
+            </div>
           ` : ''}
 
           <div class="space-y-4">
@@ -3435,16 +3440,29 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       UI.refreshIcons();
 
       if (_liveSegs) {
-        // [수정] 인풋 요소 직접 터치/클릭 즉시 편집 활성화 (가장 부드러운 모바일 입력방식 연동)
+        // [구현] 단일 화자 이름 변경 시, 대본 전체의 동일 화자를 일괄 개명하는 엔진 바인딩
         document.querySelectorAll('.spk-input').forEach(inp => {
           inp.addEventListener('blur', async () => {
             const idx = parseInt(inp.dataset.idx);
+            const oldName = _liveSegs[idx].speaker;
             const newName = inp.value.trim();
-            if (!_liveSegs[idx] || _liveSegs[idx].speaker === newName) return;
-            _liveSegs[idx].speaker = newName;
+            if (!newName || oldName === newName) return;
+
+            // 대본 데이터 전체 전수 스캔 및 교체
+            _liveSegs.forEach(seg => {
+              if (seg.speaker === oldName) {
+                seg.speaker = newName;
+              }
+            });
+
             try {
               await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
-            } catch(e) {}
+              // 화면을 즉시 부분 갱신하여 딜레이 없이 렌더링 동기화 완료
+              ViewMemoryScreen.show({ id: memory.id });
+              UI.toast(`화자명이 '${oldName}'에서 '${newName}'(으)로 일괄 교체되었습니다.`, 'success');
+            } catch(e) {
+              UI.toast('이름 저장 중 오류가 발생했습니다.', 'error');
+            }
           });
           inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); } });
         });
@@ -3459,13 +3477,43 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
               await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
             } catch(e) {}
           });
-          // 로드하자마자 줄높이 정밀 자동 리사이징
           el.style.height = 'auto';
           el.style.height = (el.scrollHeight) + 'px';
         });
       }
       _loadRelatedMemories(memory);
-     }
+    }
+
+    // [구현] 좌우 화자 역전 오결정 원클릭 보정 로직
+    async function swapSpeakers(id) {
+      const memory = await DB.getMemory(id);
+      if (!memory || !memory.content) return;
+      try {
+        const segs = JSON.parse(memory.content);
+        if (Array.isArray(segs) && segs.length > 0) {
+          const uniqueSpeakers = [...new Set(segs.map(s => s.speaker))];
+          if (uniqueSpeakers.length === 2) {
+            const [sp1, sp2] = uniqueSpeakers;
+            segs.forEach(s => {
+              s.speaker = (s.speaker === sp1) ? sp2 : sp1;
+            });
+            await DB.updateMemory(id, { content: JSON.stringify(segs) });
+            ViewMemoryScreen.show({ id });
+            UI.toast('대화 상대 좌우 화자가 반전 보정되었습니다.', 'success');
+          } else if (uniqueSpeakers.length === 1) {
+            const sp1 = uniqueSpeakers[0];
+            const sp2 = (sp1 === '나') ? '상대방' : '나';
+            segs.forEach(s => { s.speaker = sp2; });
+            await DB.updateMemory(id, { content: JSON.stringify(segs) });
+            ViewMemoryScreen.show({ id });
+            UI.toast('화자 그룹이 순환 보정되었습니다.', 'success');
+          }
+        }
+      } catch(e) {
+        UI.toast('화자 전환 도중 에러가 발생했습니다.', 'error');
+      }
+    }
+
     async function _loadRelatedMemories(memory) {
       const keywords = [
         ...(memory.title || '').split(/\s+/).filter(w => w.length > 1),
@@ -3572,7 +3620,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     function readAloud(id) {
       if (!('speechSynthesis' in window)) { UI.toast('TTS 미지원 기기', 'error'); return; }
       
-      // 이미 말하고 있다면 즉시 중지
       if (window.speechSynthesis.speaking || _ttsPlaying) {
         window.speechSynthesis.cancel();
         _ttsPlaying = false;
@@ -3588,7 +3635,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         }
         if (!text.trim()) { UI.toast('읽을 내용이 없습니다', 'info'); return; }
         
-        window.speechSynthesis.cancel(); // 초기화
+        window.speechSynthesis.cancel();
 
         const playTTS = () => {
           const utt = new SpeechSynthesisUtterance(text);
@@ -3604,7 +3651,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
           window.speechSynthesis.speak(utt);
         };
 
-        // 목소리 로딩 대기 (안드로이드 대응)
         if (window.speechSynthesis.getVoices().length === 0) {
           window.speechSynthesis.onvoiceschanged = () => {
             playTTS();
@@ -3646,9 +3692,8 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         await window.convertToScript(m.id, audioSrc, m.title, existingSegs, existingText);
 
         UI.hideLoading();
-        UI.toast('✅ 화자분리 완료! 카카오톡 대화형으로 변환됩니다.', 'success');
+        UI.toast('✅ 화자분리 완료! 대화형 목록이 갱신됩니다.', 'success');
 
-        // DB 커밋 확인 후 화면 갱신
         setTimeout(async () => {
           const refreshed = await DB.getMemory(id);
           if (refreshed && refreshed.content && refreshed.content.trim().startsWith('[')) {
@@ -3660,11 +3705,11 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
 
       } catch(e) {
         UI.hideLoading();
-        UI.toast('재분석 실패: Gemini API 키 및 모델 설정을 확인하세요.', 'error');
+        UI.toast('재분석 실패: API 키 또는 네트워크 감도를 확인하세요.', 'error');
       }
     }
 
-    return { show, edit, remove, downloadDoc, downloadDocByIndex, readAloud, reAnalyze };
+    return { show, edit, remove, downloadDoc, downloadDocByIndex, readAloud, reAnalyze, swapSpeakers };
   })();
   </script>
 
