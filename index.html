@@ -2953,23 +2953,87 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       }
     }
 
-    // [초고도화 1단계] 스마트 로컬 화자 교대 필터 (Gemini가 실패하거나 등록 전일 때 작동할 완벽한 로컬 디바이스 로직)
+// [초고도화 1단계 v2.0] 바이오메트릭 앵커 기반 패턴 매칭 화자 분리 엔진
+    // ── Step A: userVoiceBio + userVoiceTone으로 "나"의 키워드 사전 자동 구축 ──
+    const _extractMyKeywords = (bio, tone) => {
+      const kws = { names: [], endings: [], roles: [] };
+      if (bio) {
+        const nameM  = bio.match(/이름:\s*([^\n]+)/);
+        const jobM   = bio.match(/직장:\s*([^\n]+)/);
+        const wifeM  = bio.match(/와이프\s+([^(,\n]+)/);
+        const kidM   = bio.match(/딸\s+([^(,\n]+)/);
+        if (nameM)  kws.names.push(nameM[1].trim());
+        if (jobM)   kws.roles.push(...jobM[1].split(/[,，\s]/).map(s=>s.trim()).filter(Boolean));
+        if (wifeM)  kws.names.push('자기','자기야', wifeM[1].trim());
+        if (kidM) {
+          const kid = kidM[1].trim().replace(/\s*\([^)]+\)/, '');
+          kws.names.push(kid.replace(/^김/,''), kid+'아', kid+'야');
+        }
+      }
+      if (tone) {
+        (tone.match(/'([^']+)'/g)||[]).forEach(q => {
+          const w = q.replace(/'/g,'').trim();
+          if (w) kws.endings.push(w);
+        });
+      }
+      return kws;
+    };
+
+    // ── Step B: 개별 세그먼트에 대해 "나" 일치 점수 산출 ──
+    const _scoreAsMe = (text, kws) => {
+      if (!text) return 0;
+      let score = 0;
+      const t = text.toLowerCase();
+      kws.names.forEach(n   => { if (t.includes(n.toLowerCase())) score += 3; });
+      kws.endings.forEach(e => { if (t.includes(e.toLowerCase())) score += 2; });
+      kws.roles.forEach(r   => { if (t.includes(r.toLowerCase())) score += 1; });
+      return score;
+    };
+
+    // ── Step C: 핑퐁(질문→대답) 전환 감지 ──
+    const _isPingPong = (prev, curr) => {
+      const prevQ    = /[?？]/.test(prev);
+      const shortAck = curr.length < 20 && /^(네|예|아|어|응|맞|그렇|알겠|저도|저는|나는|우리|넵)/.test(curr);
+      const longToShort = prev.length > 50 && curr.length < 30;
+      return prevQ || shortAck || longToShort;
+    };
+
+    // ── Step D: 앵커 사전 생성 ──
+    const myKeywords = _extractMyKeywords(userVoiceBio, userVoiceTone);
+
     let currentLocalSpeaker = '나';
     var baseScript = segsToUse.map(function(s, i) {
       const textVal = (s.text || '').trim();
-      if (i > 0) {
-        const prevText = (segsToUse[i-1].text || '');
-        // 문장 질문 기호 및 턴교대 조건으로 화자 자동 번갈아 배치 연산
-        if (prevText.includes('?') || textVal.includes('?') || prevText.length > 40 || i % 2 === 1) {
+      if (!textVal) return null;
+
+      if (i === 0) {
+        // 첫 문장: 키워드 점수로 초기 화자 결정
+        const sc = _scoreAsMe(textVal, myKeywords);
+        currentLocalSpeaker = (sc >= 2) ? '나'
+          : (sc === 0 && textVal.length < 20 ? counterpartName : '나');
+      } else {
+        const prevText = (segsToUse[i-1].text || '').trim();
+        const sc       = _scoreAsMe(textVal, myKeywords);
+        const pingpong = _isPingPong(prevText, textVal);
+
+        if (sc >= 3) {
+          // ✅ 강한 바이오메트릭 매칭 → 무조건 '나'
+          currentLocalSpeaker = '나';
+        } else if (sc === 0 && pingpong) {
+          // ✅ 키워드 없음 + 핑퐁 → 화자 교체
+          currentLocalSpeaker = (currentLocalSpeaker === '나') ? counterpartName : '나';
+        } else if (sc < 2 && pingpong) {
+          // ✅ 약한 매칭 + 핑퐁 → 교체
           currentLocalSpeaker = (currentLocalSpeaker === '나') ? counterpartName : '나';
         }
+        // sc >= 2: 현재 화자 유지 (명확한 '나' 패턴 연속)
       }
-      return { 
-        speaker: currentLocalSpeaker, 
-        text: textVal, 
-        start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0 
+      return {
+        speaker: currentLocalSpeaker,
+        text:    textVal,
+        start:   typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0
       };
-    }).filter(function(s){ return s.text.length > 0; });
+    }).filter(function(s){ return s !== null && s.text.length > 0; });
 
     // 로컬 교대 필터링된 대본을 기본값으로 일단 즉시 DB 저장 (락/에러 시 즉각 수동 UI 지원 보장)
     try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); }
@@ -2993,19 +3057,46 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       for (let offset = 0; offset < _cnt; offset += CHUNK_SIZE) {
         let chunk = _segInput.slice(offset, offset + CHUNK_SIZE);
         
-        // [초고도화 2단계] 제미니가 복잡한 JSON 대신 가장 생성하기 쉬운 직관적 "텍스트 대본" 포맷으로 답변하도록 요청
-        var _sys = '당신은 대화 텍스트 분석기입니다. 어떠한 부연 설명이나 코드블록 마크다운을 금지하며 오직 요청한 텍스트 줄바꿈 포맷만 출력하세요.';
-        var _usr = '[임무] 다음 음성 대화 텍스트들을 분석하여 발화자가 "나(김용국)"인지 "' + counterpartName + '" 인지 판별하세요.\n' +
-          '반드시 제공된 세그먼트 개수 ' + chunk.length + '개 전체를 한 줄에 하나씩 아래 형식으로만 출력하세요.\n\n' +
-          '[출력 형식]\n' +
-          '[시작시간] 화자명: 대화내용\n\n' +
-          '[출력 예시]\n' +
-          '[0.0] 나: 여보세요?\n' +
-          '[2.5] ' + counterpartName + ': 어 용국아.\n\n' +
-          '[판별 가이드 ("나"의 인적 이력)]\n' +
-          userVoiceBio + '\n' +
-          '- 어미 특징: ' + userVoiceTone + '\n\n' +
-          '[데이터]\n' + JSON.stringify(chunk);
+      // [초고도화 2단계 v2.0] 바이오메트릭 앵커 임베딩 프롬프트 엔진
+        const _buildKwHints = (kws) => {
+          const p = [];
+          if (kws.names.length)   p.push(`호칭/부름: "${kws.names.join('", "')}"`);
+          if (kws.endings.length) p.push(`습관어/종결: "${kws.endings.join('", "')}"`);
+          if (kws.roles.length)   p.push(`업무/회사어: "${kws.roles.join('", "')}"`);
+          return p.length ? '- ' + p.join('\n- ') : '(키워드 미등록)';
+        };
+
+        var _sys = [
+          '당신은 통화 대화 화자 분리 전문가입니다.',
+          '절대 금지: 부연설명, 코드블록(```), JSON, 마크다운, 번호 없는 출력.',
+          '오직 아래 [출력형식] 줄바꿈 텍스트만 출력하세요.',
+          '[출력형식] [시작시간] 화자명: 대화내용'
+        ].join(' ');
+
+        var _usr = [
+          `[핵심 임무] 아래 ${chunk.length}개 세그먼트의 화자를 "나" 또는 "${counterpartName}" 중 하나로 판별하세요.`,
+          `출력 줄 수 = 입력 세그먼트 수 (정확히 ${chunk.length}줄 출력).`,
+          '',
+          '━━━ 나(발화자1) 바이오메트릭 앵커 ━━━',
+          `[인적사항]\n${userVoiceBio}`,
+          `[목소리/어미]\n${userVoiceTone}`,
+          `[키워드 사전]\n${_buildKwHints(myKeywords)}`,
+          '',
+          '━━━ 판별 우선순위 규칙 ━━━',
+          '규칙1 (최우선): 키워드 사전 단어 포함 → 즉시 "나"',
+          '규칙2: "네/아 예/넵/알겠습니다" 등 짧은 응답 → 직전 화자와 반대',
+          '규칙3: 물음표(?) 직후 문장 → 화자 전환',
+          '규칙4: 회사/업무 전문어 포함 → "나" 가중치',
+          '규칙5: 불명확 시 핑퐁(교대) 원칙',
+          '',
+          '━━━ 출력 예시 ━━━',
+          `[0.0] 나: 여보세요 오 대리님.`,
+          `[2.3] ${counterpartName}: 아 김 부장님 안녕하세요.`,
+          `[5.1] 나: 넵 잘 지내셨어요?`,
+          '',
+          '━━━ 분석 데이터 ━━━',
+          JSON.stringify(chunk)
+        ].filter(Boolean).join('\n');
 
         var _raw = await AbacusAI.callLLM(_usr, _sys, 4000);
         if (_raw) {
