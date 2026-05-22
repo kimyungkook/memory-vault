@@ -2958,9 +2958,34 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     const userVoiceBio  = await DB.getSetting('userVoiceBio')  || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
     const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 사용';
 
-    // ── Step A: userVoiceBio + userVoiceTone으로 "나"의 키워드 사전 자동 구축 ──
+   // ── Step A: userVoiceBio + userVoiceTone으로 "나"의 키워드 사전 자동 구축 ──
     const _extractMyKeywords = (bio, tone) => {
       const kws = { names: [], endings: [], roles: [] };
+      if (bio.includes('용국')) kws.names.push('용국', '김용국');
+      if (bio.includes('부장')) kws.names.push('부장님', '부장');
+      if (bio.includes('팀장')) kws.names.push('팀장님', '팀장');
+      if (bio.includes('자기')) kws.names.push('자기야', '자기');
+      if (tone.includes('넵')) kws.endings.push('넵', '아 예', '예', '그렇죠');
+      kws.roles.push('영업', '넥스팩'); 
+      return kws;
+    };
+    const myKeywords = _extractMyKeywords(userVoiceBio, userVoiceTone);
+
+    const _scoreAsMe = (text, kws) => {
+      let score = 0;
+      kws.names.forEach(w => { if(text.includes(w)) score += 2; });
+      kws.endings.forEach(w => { if(text.endsWith(w) || text.includes(w+' ')) score += 1; });
+      kws.roles.forEach(w => { if(text.includes(w)) score += 1; });
+      return score;
+    };
+
+    const _isPingPong = (prev, curr) => {
+      if (!prev) return false;
+      return prev.trim().endsWith('?') || curr.length <= 18;
+    };
+
+    let currentLocalSpeaker = '나';
+
     var baseScript = segsToUse.map(function(s, i) {
       const textVal = (s.text || '').trim();
       if (!textVal) return null;
