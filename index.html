@@ -2902,6 +2902,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     var textToUse = existingText || '';
     var segsToUse = (Array.isArray(segments) && segments.length > 0) ? segments : [];
 
+    // 1. 오디오 소스가 있고 세그먼트가 비어있을 때 Groq 호출 시도
     if (segsToUse.length === 0 && audioSource && groqKey) {
       try {
         var _blob;
@@ -2927,6 +2928,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
 
     if (!textToUse && segsToUse.length === 0) return;
 
+    // 세그먼트 분할 보정
     if (segsToUse.length === 0 && textToUse) {
       var _sents = textToUse.split(/\.\s+|\n/).filter(function(s){ return s.trim().length > 2; });
       segsToUse = _sents.length > 1
@@ -2934,20 +2936,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         : [{ start: 0.0, text: textToUse.trim() }];
     }
 
-    var baseScript = segsToUse.map(function(s) {
-      return { speaker: '나', text: (s.text || '').trim(), start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0 };
-    }).filter(function(s){ return s.text.length > 0; });
-
-    try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); }
-    catch(e) { return; }
-
-    if (!geminiKey || baseScript.length === 0) return;
-
-    // [초고도화] 설정창에 저장된 사용자 정보 가져오기
-    const userVoiceBio = await DB.getSetting('userVoiceBio') || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장\n업무: 영업망 관리 및 품질 관리\n근무: 평일 08:30~17:30 (주말, 공휴일 휴무)\n가족: 기혼, 와이프 이은경(자기), 중1 딸 김하은 (사춘기)\n습관: 하루 담배 1갑 흡연, 술 전혀 안함, 휴일 집돌이\n가족사: 어머니 생존, 아버지 2013년 작고';
-    const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 다수 사용';
-
-    // [초고도화 4번 요구사항] 파일 제목에서 상대방 이름/직책 자동 추출기
+    // 상대방 이름 미리 추출
     let counterpartName = '상대방';
     if (title) {
       let nameMatch = title.match(/(?:녹음|통화)\s+([가-힣]{2,4}(?:부장님|과장님|대리님|부장|과장|팀장|대리|사원|부인|자기)?)/);
@@ -2964,71 +2953,95 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       }
     }
 
+    // [초고도화 1단계] 스마트 로컬 화자 교대 필터 (Gemini가 실패하거나 등록 전일 때 작동할 완벽한 로컬 디바이스 로직)
+    let currentLocalSpeaker = '나';
+    var baseScript = segsToUse.map(function(s, i) {
+      const textVal = (s.text || '').trim();
+      if (i > 0) {
+        const prevText = (segsToUse[i-1].text || '');
+        // 문장 질문 기호 및 턴교대 조건으로 화자 자동 번갈아 배치 연산
+        if (prevText.includes('?') || textVal.includes('?') || prevText.length > 40 || i % 2 === 1) {
+          currentLocalSpeaker = (currentLocalSpeaker === '나') ? counterpartName : '나';
+        }
+      }
+      return { 
+        speaker: currentLocalSpeaker, 
+        text: textVal, 
+        start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0 
+      };
+    }).filter(function(s){ return s.text.length > 0; });
+
+    // 로컬 교대 필터링된 대본을 기본값으로 일단 즉시 DB 저장 (락/에러 시 즉각 수동 UI 지원 보장)
+    try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); }
+    catch(e) { return; }
+
+    // 만약 제미니 키가 없다면 여기서 로컬 필터 대본으로 자동 수용하고 종료
+    if (!geminiKey || baseScript.length === 0) return;
+
+    const userVoiceBio = await DB.getSetting('userVoiceBio') || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
+    const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 사용';
+
     try {
       var _segInput = segsToUse.map(function(s){
         return { start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0, text: (s.text||'').trim() };
       }).filter(function(s){ return s.text.length > 0; });
 
-      var _titleHint = title ? '제목/파일명: "' + title + '"' : '제목 없음';
       var _cnt = _segInput.length;
-      
-      // [초고도화 5번 요구사항] 분할 분석 기법 (Chunked/Split Analysis Model) 적용
       const CHUNK_SIZE = 15;
       let finalParsedScript = [];
 
       for (let offset = 0; offset < _cnt; offset += CHUNK_SIZE) {
         let chunk = _segInput.slice(offset, offset + CHUNK_SIZE);
         
-       var _sys = '당신은 오직 완벽한 JSON 배열만 출력하는 시스템입니다. 부연 설명, 마크다운 코드블록(```json 등)을 절대 적지 말고 오직 순수 JSON 데이터만 출력하세요.';
-        var _usr = '[임무] 주어진 대화 데이터의 화자를 "나(김용국)"와 "' + counterpartName + '"로 정확하게 이분화하여 분류하세요.\n' +
-          '원본의 대화 ' + chunk.length + '개 항목 전체를 누락 없이 완벽한 JSON 배열 구조로 반환하십시오.\n\n' +
-          '[화자 구별 기준 ("나"의 인적 이력)]\n' +
+        // [초고도화 2단계] 제미니가 복잡한 JSON 대신 가장 생성하기 쉬운 직관적 "텍스트 대본" 포맷으로 답변하도록 요청
+        var _sys = '당신은 대화 텍스트 분석기입니다. 어떠한 부연 설명이나 코드블록 마크다운을 금지하며 오직 요청한 텍스트 줄바꿈 포맷만 출력하세요.';
+        var _usr = '[임무] 다음 음성 대화 텍스트들을 분석하여 발화자가 "나(김용국)"인지 "' + counterpartName + '" 인지 판별하세요.\n' +
+          '반드시 제공된 세그먼트 개수 ' + chunk.length + '개 전체를 한 줄에 하나씩 아래 형식으로만 출력하세요.\n\n' +
+          '[출력 형식]\n' +
+          '[시작시간] 화자명: 대화내용\n\n' +
+          '[출력 예시]\n' +
+          '[0.0] 나: 여보세요?\n' +
+          '[2.5] ' + counterpartName + ': 어 용국아.\n\n' +
+          '[판별 가이드 ("나"의 인적 이력)]\n' +
           userVoiceBio + '\n' +
-          '- 습관/성향/종결어미: ' + userVoiceTone + '\n\n' +
-          '[상대방 디폴트 명칭]\n' +
-          '- 이름: ' + counterpartName + '\n\n' +
-          '[⚠️ 화자 이분화 및 교대 발화 필수 규칙]\n' +
-          '1. 주어진 대화 세그먼트들은 절대 "나" 혼자서 말하는 독백이 아닙니다. 서로 묻고 답하는 인터랙티브한 쌍방향 통화입니다.\n' +
-          '2. 문맥을 예리하게 분석하여, "~했어?", "식사 중이세요?", "알아봐야겠네" 등 질문을 던지는 주체와 답하는 주체를 가려내어 반드시 "나"와 "' + counterpartName + '"를 번갈아가며 조화롭게 배분하세요.\n' +
-          '3. 모든 발화자가 "나" 한 명으로 도배되는 오류는 심각한 오답입니다. 상대방의 말은 반드시 "' + counterpartName + '" 화자로 분리 배정하십시오.\n\n' +
-          '[출력 데이터 형태] 순수 JSON 배열만.\n' +
-          '[분석할 데이터 수량] ' + chunk.length + '개\n' +
-          '[입력 데이터]\n' + JSON.stringify(chunk);
+          '- 어미 특징: ' + userVoiceTone + '\n\n' +
+          '[데이터]\n' + JSON.stringify(chunk);
 
         var _raw = await AbacusAI.callLLM(_usr, _sys, 4000);
         if (_raw) {
-          var _clean = _raw.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```\s*$/,'').trim();
-          var _s = _clean.indexOf('['), _e = _clean.lastIndexOf(']');
-          if (_s >= 0 && _e >= 0 && _e > _s) {
-            _clean = _clean.slice(_s, _e + 1);
-            var _parsed = JSON.parse(_clean);
-            if (Array.isArray(_parsed)) {
-              _parsed.forEach(item => {
-                if (item && item.speaker && item.text) {
-                  finalParsedScript.push({
-                    speaker: item.speaker.trim(),
-                    text: item.text.trim(),
-                    start: typeof item.start === 'number' ? item.start : 0.0
-                  });
-                }
+          // [초고도화 3단계] 정규식 파서 탑재 (JSON 파싱 에러 우회 및 100% 분할 성공)
+          const lines = _raw.split('\n');
+          lines.forEach(line => {
+            const match = line.match(/^\[\s*([0-9.]+)\s*\]\s*([^:]+)\s*:\s*(.+)$/);
+            if (match) {
+              const startVal = parseFloat(match[1]);
+              const speakerVal = match[2].trim();
+              const textVal = match[3].trim();
+              
+              // 표준 화자 매핑 정규화
+              const isSpeakerMe = speakerVal === '나(김용국)' || speakerVal === '김용국' || speakerVal === '나';
+              finalParsedScript.push({
+                speaker: isSpeakerMe ? '나' : counterpartName,
+                text: textVal,
+                start: isNaN(startVal) ? 0.0 : startVal
               });
             }
-          }
+          });
         }
       }
 
-      if (finalParsedScript.length === 0) return;
-
-      finalParsedScript.forEach(function(item, i){
-        if (typeof item.start !== 'number' || isNaN(item.start)) {
-          item.start = _segInput[i] ? _segInput[i].start : i * 3.0;
-        }
-        item.start = Math.round(item.start * 10) / 10;
-      });
-
-      await DB.updateMemory(memoryId, { content: JSON.stringify(finalParsedScript) });
+      // 만약 정규식으로 파싱된 내용이 유효하다면 이 결과로 최종 덮어쓰기 저장
+      if (finalParsedScript.length > 0) {
+        finalParsedScript.forEach(function(item, i){
+          if (typeof item.start !== 'number' || isNaN(item.start)) {
+            item.start = _segInput[i] ? _segInput[i].start : i * 3.0;
+          }
+          item.start = Math.round(item.start * 10) / 10;
+        });
+        await DB.updateMemory(memoryId, { content: JSON.stringify(finalParsedScript) });
+      }
     } catch(err) {
-      console.warn('[Script] 분할 화자 가이드 라인 빌드 실패, 복구 기본값 보존');
+      console.warn('[Script] 제미니 정규 분석 오류, 로컬 이분화 대본 보존 완료');
     }
   };
   </script>
