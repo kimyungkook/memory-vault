@@ -3068,6 +3068,26 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     const userVoiceBio = await DB.getSetting('userVoiceBio') || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
     const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 사용';
 
+    // ── 변환 중 화면잠금 방지 wakeLock 획득 ──
+    let _convWakeLock = null;
+    let _convSilent = null;
+    try {
+      if ('wakeLock' in navigator) {
+        _convWakeLock = await navigator.wakeLock.request('screen').catch(() => null);
+      }
+      const SILENT = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV6urq6urq6urq6urq6urq6urq6urq6urq6v///////////8AAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAA';
+      _convSilent = new Audio(SILENT);
+      _convSilent.loop = true;
+      _convSilent.volume = 0.001;
+      await _convSilent.play().catch(() => {});
+    } catch(e) {}
+
+    const _releaseConvLock = () => {
+      try { if (_convWakeLock) _convWakeLock.release(); } catch(e) {}
+      try { if (_convSilent) { _convSilent.pause(); _convSilent.src = ''; } } catch(e) {}
+      _convWakeLock = null; _convSilent = null;
+    };
+
     try {
       var _segInput = segsToUse.map(function(s){
         return { start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0, text: (s.text||'').trim() };
@@ -3076,11 +3096,15 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       var _cnt = _segInput.length;
       const CHUNK_SIZE = 15;
       let finalParsedScript = [];
+      const totalChunks = Math.ceil(_cnt / CHUNK_SIZE);
 
       for (let offset = 0; offset < _cnt; offset += CHUNK_SIZE) {
         let chunk = _segInput.slice(offset, offset + CHUNK_SIZE);
-        
-      // [초고도화 2단계 v2.0] 바이오메트릭 앵커 임베딩 프롬프트 엔진
+        const chunkNum = Math.floor(offset / CHUNK_SIZE) + 1;
+
+        // 진행상황 DB 임시 저장 (UI 폴링용)
+        await DB.setSetting('scriptProgress', `${chunkNum}/${totalChunks}`).catch(()=>{});
+
         const _buildKwHints = (kws) => {
           const p = [];
           if (kws.names.length)   p.push(`호칭/부름: "${kws.names.join('", "')}"`);
@@ -3121,18 +3145,24 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
           JSON.stringify(chunk)
         ].filter(Boolean).join('\n');
 
-        var _raw = await AbacusAI.callLLM(_usr, _sys, 4000);
-        if (_raw) {
-          // [초고도화 3단계] 정규식 파서 탑재 (JSON 파싱 에러 우회 및 100% 분할 성공)
-          const lines = _raw.split('\n');
+        // 청크당 최대 45초 타임아웃 적용
+        const _rawResult = await Promise.race([
+          AbacusAI.callLLM(_usr, _sys, 2000),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('chunk_timeout')), 45000))
+        ]).catch(err => {
+          console.warn(`[Script] 청크 ${chunkNum} 타임아웃/실패 — 로컬 교대로 대체`);
+          // 타임아웃 시 해당 청크는 baseScript의 로컬 분석 결과 사용
+          return null;
+        });
+
+        if (_rawResult) {
+          const lines = _rawResult.split('\n');
           lines.forEach(line => {
             const match = line.match(/^\[\s*([0-9.]+)\s*\]\s*([^:]+)\s*:\s*(.+)$/);
             if (match) {
               const startVal = parseFloat(match[1]);
               const speakerVal = match[2].trim();
               const textVal = match[3].trim();
-              
-              // 표준 화자 매핑 정규화
               const isSpeakerMe = speakerVal === '나(김용국)' || speakerVal === '김용국' || speakerVal === '나';
               finalParsedScript.push({
                 speaker: isSpeakerMe ? '나' : counterpartName,
@@ -3141,10 +3171,13 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
               });
             }
           });
+        } else {
+          // 타임아웃된 청크: baseScript의 해당 구간으로 보완
+          const fallbackChunk = baseScript.slice(offset, offset + CHUNK_SIZE);
+          finalParsedScript.push(...fallbackChunk);
         }
       }
 
-      // 만약 정규식으로 파싱된 내용이 유효하다면 이 결과로 최종 덮어쓰기 저장
       if (finalParsedScript.length > 0) {
         finalParsedScript.forEach(function(item, i){
           if (typeof item.start !== 'number' || isNaN(item.start)) {
@@ -3156,6 +3189,10 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       }
     } catch(err) {
       console.warn('[Script] 제미니 정규 분석 오류, 로컬 이분화 대본 보존 완료');
+    } finally {
+      // ── 변환 완료 후 wakeLock 해제 ──
+      _releaseConvLock();
+      await DB.setSetting('scriptProgress', null).catch(()=>{});
     }
   };
   </script>
