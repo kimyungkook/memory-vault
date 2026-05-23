@@ -1151,7 +1151,7 @@ reader.onload = async () => {
     } catch(e) {}
   }
 
-  try {
+ try {
     const newId = await DB.addMemory({
       title: autoTitle,
       type: 'voice',
@@ -1160,19 +1160,9 @@ reader.onload = async () => {
       tags: ['빠른녹음', '음성'],
       priority: 'medium',
       folderId: null,
-      encrypted: false
+      encrypted: false,
+      rawSegments: segments // ◀ 수동 분석을 위해 정밀 Whisper 시간 데이터 임시 보관
     });
-
-    // 저장 완료 후 백그라운드 대본 자동 생성 호출
-    setTimeout(() => {
-      try {
-        if (typeof window.convertToScript === 'function') {
-          window.convertToScript(newId, blob, autoTitle, segments, transcriptText);
-        }
-      } catch (e) {
-        console.warn('[QuickRecord] convertToScript 호출 실패', e);
-      }
-    }, 400);
 
     UI.toast(`✅ "${autoTitle}" 저장 완료!`, 'success');
   } catch (err) {
@@ -2402,18 +2392,21 @@ window.HomeScreen = (() => {
           await DB.updateMemory(editId, { title, content: transcriptText, audioData: audioStore, folderId, priority, tags });
           UI.toast('음성이 수정되었습니다', 'success');
         } else {
-          const newMemId = await DB.addMemory({ title, content: transcriptText, type: 'voice', audioData: audioStore, folderId, priority, tags, encrypted: false });
-        // 백그라운드 대본 변환
-        const _segsForConvert = _lastSegments.slice();
-        const _blobForConvert = audioBlob || (audioDataList.length > 0 ? audioDataList[0] : null);
-        _lastSegments = [];
-        if (_blobForConvert || _segsForConvert.length > 0 || transcriptText) {
-          setTimeout(() => convertToScript(newMemId, _blobForConvert, title, _segsForConvert, transcriptText), 400);
-        }
+          const newMemId = await DB.addMemory({ 
+            title, 
+            content: transcriptText, 
+            type: 'voice', 
+            audioData: audioStore, 
+            folderId, 
+            priority, 
+            tags, 
+            encrypted: false,
+            rawSegments: _lastSegments.slice() // ◀ 수동 분석용 세그먼트 데이터 백업
+          });
+          _lastSegments = [];
           UI.toast('음성이 저장되었습니다', 'success');
         }
         App.navigate('home');
-      } catch (e) {
         UI.toast('저장 실패: ' + e.message, 'error');
       }
     }
@@ -2576,18 +2569,11 @@ window.HomeScreen = (() => {
                 tags: autoTags,
                 priority: 'medium',
                 folderId: null,
-                encrypted: false
+                encrypted: false,
+                rawSegments: transcriptSegments // ◀ 운전 모드 대본 세그먼트 임시 백업
               });
-              // 백그라운드 대본 변환 (저장 완료 후 비동기 실행)
-              setTimeout(() => convertToScript(
-                savedDriveId, null, autoTitle, transcriptSegments, transcriptText
-              ), 400);
 
               timerEl.textContent = '✅';
-              btn.innerHTML = '<span style="font-size:36px">🎉</span>';
-              label.textContent = '저장 완료!';
-              hintEl.innerHTML = `<span style="color:#4ade80;font-weight:600">"${autoTitle}"</span><br>으로 자동 저장되었어요!`;
-              UI.toast(`✅ "${autoTitle}" 자동 저장 완료!`, 'success');
 
               setTimeout(() => {
                 if (driveModeOverlay) {
@@ -3371,21 +3357,19 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
             </button>
           </div>
 
-          ${memory.type === 'voice' ? `
+           ${memory.type === 'voice' ? `
             ${(!displayContent || !displayContent.trim().startsWith('[')) ? `
             <div id="converting-banner"
               style="width:100%;margin-bottom:12px;padding:12px 16px;border-radius:12px;
                      background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.3);
                      display:flex;align-items:center;gap:10px;">
-              <div style="width:16px;height:16px;border:2px solid #6366f1;
-                          border-top-color:transparent;border-radius:50%;
-                          animation:spin 0.8s linear infinite;flex-shrink:0;"></div>
+              <span style="font-size:18px">💬</span>
               <div style="flex:1;">
                 <p style="font-size:13px;font-weight:600;color:#a5b4fc;margin:0;">
-                  AI 화자분리 변환 중...
+                  일반 텍스트 대본 상태입니다.
                 </p>
                 <p style="font-size:11px;color:#64748b;margin:2px 0 0;">
-                  완료되면 카카오톡 대화형으로 자동 전환됩니다
+                  아래 'AI 화자 재분석' 버튼을 클릭하면 즉시 화자분리 처리가 구동됩니다.
                 </p>
               </div>
             </div>
@@ -3662,20 +3646,22 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
      });
     }
 
-    async function reAnalyze(id) {
+   async function reAnalyze(id) {
       const m = await DB.getMemory(id);
       if (!m || m.type !== 'voice') return;
 
-      UI.showLoading('🤖 AI 화자분리 재분석 중... (최대 30초 소요)');
+      UI.showLoading('🤖 AI 화자분리 분석 중... (최대 30초 소요)');
 
       let existingText = '';
-      let existingSegs = [];
+      let existingSegs = m.rawSegments || []; // ◀ 백업 보존된 정밀 Whisper 타임라인 우선 재사용
 
       if (m.content) {
         if (m.content.trim().startsWith('[')) {
           try {
             const parsed = JSON.parse(m.content);
-            existingSegs = parsed.map(s => ({ start: s.start || 0, text: s.text || '' }));
+            if (existingSegs.length === 0) {
+              existingSegs = parsed.map(s => ({ start: s.start || 0, text: s.text || '' }));
+            }
             existingText = parsed.map(s => s.text).join(' ');
           } catch(e) { existingText = m.content; }
         } else {
