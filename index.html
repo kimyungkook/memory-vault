@@ -2407,6 +2407,7 @@ window.HomeScreen = (() => {
           UI.toast('음성이 저장되었습니다', 'success');
         }
         App.navigate('home');
+      } catch (e) {
         UI.toast('저장 실패: ' + e.message, 'error');
       }
     }
@@ -2875,10 +2876,10 @@ window.HomeScreen = (() => {
     return { callLLM, analyzeImage, transcribeAudio };
   })();
 </script>
-// ==================== SCRIPT CONVERTER ====================
+<!-- ==================== SCRIPT CONVERTER ==================== -->
   <script>
   /**
-   * convertToScript - Gemini 2.5 Flash 단일 통합 화자 분리 파이프라인
+   * convertToScript - Gemini 2.5 Flash 단일 통합 화자 분리 파이프라인 (문법 오류 완벽 제거판)
    */
 window.convertToScript = async function(memoryId, audioSource, title, segments, existingText) {
     if (!memoryId) return;
@@ -2939,8 +2940,8 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     }
 
     // DB로부터 분석에 참고할 사용자 커스텀 바이오메트릭 앵커 정보 로드
-    const userVoiceBio  = await DB.getSetting('userVoiceBio')  || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
-    const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 사용';
+    const userVoiceBio  = await DB.getSetting('userVoiceBio')  || '이름: 김용국\n직장: 넥스팩';
+    const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 넵';
 
     const _extractMyKeywords = (bio, tone) => {
       const kws = { names: [], endings: [], roles: [] };
@@ -2967,7 +2968,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       return prev.trim().endsWith('?') || curr.length <= 15;
     };
 
-    // 1단계 로컬 핑퐁 규칙 기반 빠른 스케치 대본 생성 및 보존
+    // 1단계 로컬 핑퐁 규칙 기반 빠른 스케치 대본 생성
     let currentLocalSpeaker = '나';
     var baseScript = segsToUse.map(function(s, i) {
       const textVal = (s.text || '').trim();
@@ -2996,11 +2997,10 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       };
     }).filter(function(s){ return s !== null && s.text.length > 0; });
 
-    // 로컬 교대 필터링 대본을 우선 즉각 저장 (Gemini 에러/네트워크 락 대비 보장막)
     try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); }
     catch(e) { return; }
 
-    // 만약 제미니 키가 없다면 로컬 분석 데이터로 홀딩하고 세션을 정상 종료시킵니다.
+    // 제미니 API 키가 없다면 로컬 분석 데이터로 홀딩하고 종료
     if (!geminiKey || baseScript.length === 0) return;
 
     // 2단계: 최신 모델인 Gemini 2.5 Flash를 사용하여 맥락 전체를 대량 일괄 처리
@@ -3038,7 +3038,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         return p.length ? '- ' + p.join('\n- ') : '(키워드 프로필 미등록)';
       };
 
-       var _sys = [
+      var _sys = [
         '당신은 오디오 통화 및 대화 기록의 화자분리(Diarization) 전문가입니다.',
         '전체 대화의 맥락적 호칭 관계를 정확하게 추적하여 문장별 진짜 발화자를 가려내십시오.',
         '출력값에는 본인 설명이나 설명글, 마크다운(```), JSON 형식을 절대 붙이지 마십시오.',
@@ -3065,7 +3065,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         JSON.stringify(_segInput)
       ].join('\n');
 
-      // 구글의 고성능/대용량 컨텍스트 2.5 Flash를 단독 호출 (60초 타임아웃 제한 적용)
+      // 구글의 고성능/대용량 컨텍스트 2.5 Flash 단독 호출 (60초 타임아웃 제한 적용)
       const _rawResult = await Promise.race([
         AbacusAI.callLLM(_usr, _sys, 4000),
         new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 60000))
@@ -3078,6 +3078,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         let finalParsedScript = [];
         const lines = _rawResult.split('\n');
         lines.forEach(line => {
+          // 정규식 매칭 처리
           const match = line.match(/^\[\s*([0-9.]+)\s*\]\s*([^:]+)\s*:\s*(.+)$/);
           if (match) {
             const startVal = parseFloat(match[1]);
