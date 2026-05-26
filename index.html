@@ -485,18 +485,15 @@
       const theme = await DB.getSetting('theme');
       const encryptionEnabled = await DB.getSetting('encryptionEnabled');
       const abacusApiKey = await DB.getSetting('abacusApiKey');
-      const geminiApiKey = await DB.getSetting('geminiApiKey');
+     const geminiApiKey = await DB.getSetting('geminiApiKey');
       const groqApiKey = await DB.getSetting('groqApiKey');
       const groqSttModel = await DB.getSetting('groqSttModel');
       const geminiModel = await DB.getSetting('geminiModel');
-      if (theme) state.theme = theme;
-      if (encryptionEnabled !== null) state.encryptionEnabled = !!encryptionEnabled;
-      if (abacusApiKey) state.abacusApiKey = abacusApiKey;
-      if (geminiApiKey) state.geminiApiKey = geminiApiKey;
-      if (groqApiKey) state.groqApiKey = groqApiKey;
-      if (groqSttModel) state.groqSttModel = groqSttModel;
-      if (geminiModel) state.geminiModel = geminiModel;
       
+      // [추가] Deepgram API 키 로드
+      const deepgramApiKey = await DB.getSetting('deepgramApiKey');
+      if (deepgramApiKey) state.deepgramApiKey = deepgramApiKey;
+
       // [추가] API 락(Lock) 상태값 로드
       const apiLocked = await DB.getSetting('apiLocked');
       state.apiLocked = !!apiLocked;
@@ -2899,10 +2896,124 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     if (!memoryId) return;
     var groqKey   = AppState.get('groqApiKey');
     var geminiKey = AppState.get('geminiApiKey');
+    var deepgramKey = AppState.get('deepgramApiKey');
     var textToUse = existingText || '';
     var segsToUse = (Array.isArray(segments) && segments.length > 0) ? segments : [];
 
-    // 1. 오디오 소스가 있고 세그먼트가 비어있을 때 Groq 호출 시도
+    // 상대방 이름 미리 추출
+    let counterpartName = '상대방';
+    if (title) {
+      let nameMatch = title.match(/(?:녹음|통화)\s+([가-힣]{2,4}(?:부장님|과장님|대리님|부장|과장|팀장|대리|사원|부인|자기)?)/);
+      if (nameMatch) {
+        counterpartName = nameMatch[1].trim();
+      } else {
+        let parts = title.split(/[_\s]+/);
+        for (let p of parts) {
+          if (p.match(/[가-힣]{2,4}(부장|과장|대리|팀장|자기|부인)/)) {
+            counterpartName = p.trim();
+            break;
+          }
+        }
+      }
+    }
+
+    // ==========================================
+    // [1선] Deepgram 물리 성문 대조 화자 분리 API 가동
+    // ==========================================
+    if (deepgramKey && audioSource && !AppState.get('apiLocked')) {
+      try {
+        var _blob;
+        if (audioSource instanceof Blob) {
+          _blob = audioSource;
+        } else if (typeof audioSource === 'string' && audioSource.indexOf('base64') > -1) {
+          var _arr  = audioSource.split(',');
+          var _mime = (_arr[0].match(/:(.*?);/) || [])[1] || 'audio/webm';
+          var _bstr = atob(_arr[1]);
+          var _u8   = new Uint8Array(_bstr.length);
+          for (var _i = 0; _i < _bstr.length; _i++) _u8[_i] = _bstr.charCodeAt(_i);
+          _blob = new Blob([_u8], { type: _mime });
+        }
+
+        if (_blob) {
+          // 한국어(ko), Nova-2 모델 가동, 화자분리(diarize=true), 스마트문장포맷팅 활성화
+          var response = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&language=ko&diarize=true&smart_format=true', {
+            method: 'POST',
+            headers: {
+              'Authorization': 'Token ' + deepgramKey,
+              'Content-Type': _blob.type || 'audio/webm'
+            },
+            body: _blob
+          });
+
+          if (response.ok) {
+            var data = await response.json();
+            var words = data.results?.channels?.[0]?.alternatives?.[0]?.words || [];
+
+            if (words.length > 0) {
+              var rawSegments = [];
+              var curSeg = null;
+
+              words.forEach(w => {
+                var wordText = w.punctuated_word || w.word;
+                if (!curSeg || curSeg.speakerIndex !== w.speaker) {
+                  if (curSeg) rawSegments.push(curSeg);
+                  curSeg = {
+                    speakerIndex: w.speaker,
+                    text: wordText,
+                    start: w.start,
+                    end: w.end
+                  };
+                } else {
+                  curSeg.text += (wordText.match(/^[가-힣A-Za-z0-9]/) ? ' ' : '') + wordText;
+                  curSeg.end = w.end;
+                }
+              });
+              if (curSeg) rawSegments.push(curSeg);
+
+              // [초고도화] 비즈니스 호칭 기반 동적 화자 추적 매퍼 (김부장/김팀장 호칭을 부르는 화자 인덱스를 김현수사장님으로 자동 추적)
+              var counterpartIndex = null;
+              for (var i = 0; i < rawSegments.length; i++) {
+                var t = rawSegments[i].text;
+                if (t.includes('김부장') || t.includes('김팀장') || t.includes('김 부장') || t.includes('김 팀장')) {
+                  counterpartIndex = rawSegments[i].speakerIndex;
+                  break;
+                }
+              }
+
+              var finalScript = rawSegments.map(s => {
+                var isMe = false;
+                if (counterpartIndex !== null) {
+                  isMe = s.speakerIndex !== counterpartIndex;
+                } else {
+                  isMe = s.speakerIndex === 0 || s.speakerIndex === '0';
+                }
+                return {
+                  speaker: isMe ? '나' : counterpartName,
+                  text: s.text,
+                  start: Math.round(s.start * 10) / 10
+                };
+              });
+
+              await DB.updateMemory(memoryId, { content: JSON.stringify(finalScript) });
+              UI.toast('🎯 [1선] Deepgram 성문 분석 대본 완료!', 'success');
+              
+              // 시뮬레이션 토큰 누적 반영
+              var durationSec = words.length > 0 ? (words[words.length - 1].end) : 0;
+              await TokenTracker.addAudioUsage(durationSec);
+              return; // 1선 가동 완벽 성공 시 즉시 리턴 종료
+            }
+          } else {
+            console.warn('[Deepgram] 크레딧 소진 또는 통신 에러 발생. 2선(Gemini) 전환합니다.');
+          }
+        }
+      } catch(dgErr) {
+        console.warn('[Deepgram] 1선 실패. 2선(Gemini) 자동 우회 작동:', dgErr);
+      }
+    }
+
+    // ==========================================
+    // [2선] 만약 1선(Deepgram) 실패 시 Gemini 우회 복구 프로세스 가동
+    // ==========================================
     if (segsToUse.length === 0 && audioSource && groqKey) {
       try {
         var _blob;
@@ -2928,7 +3039,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
 
     if (!textToUse && segsToUse.length === 0) return;
 
-    // 세그먼트 분할 보정
     if (segsToUse.length === 0 && textToUse) {
       var _sents = textToUse.split(/\.\s+|\n/).filter(function(s){ return s.trim().length > 2; });
       segsToUse = _sents.length > 1
@@ -2936,30 +3046,11 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         : [{ start: 0.0, text: textToUse.trim() }];
     }
 
-    // 상대방 이름 미리 추출
-    let counterpartName = '상대방';
-    if (title) {
-      let nameMatch = title.match(/(?:녹음|통화)\s+([가-힣]{2,4}(?:부장님|과장님|대리님|부장|과장|팀장|대리|사원|부인|자기)?)/);
-      if (nameMatch) {
-        counterpartName = nameMatch[1].trim();
-      } else {
-        let parts = title.split(/[_\s]+/);
-        for (let p of parts) {
-          if (p.match(/[가-힣]{2,4}(부장|과장|대리|팀장|자기|부인)/)) {
-            counterpartName = p.trim();
-            break;
-          }
-        }
-      }
-    }
-
-    // [초고도화 1단계] 스마트 로컬 화자 교대 필터 (Gemini가 실패하거나 등록 전일 때 작동할 완벽한 로컬 디바이스 로직)
     let currentLocalSpeaker = '나';
     var baseScript = segsToUse.map(function(s, i) {
       const textVal = (s.text || '').trim();
       if (i > 0) {
         const prevText = (segsToUse[i-1].text || '');
-        // 문장 질문 기호 및 턴교대 조건으로 화자 자동 번갈아 배치 연산
         if (prevText.includes('?') || textVal.includes('?') || prevText.length > 40 || i % 2 === 1) {
           currentLocalSpeaker = (currentLocalSpeaker === '나') ? counterpartName : '나';
         }
@@ -2971,14 +3062,12 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       };
     }).filter(function(s){ return s.text.length > 0; });
 
-    // 로컬 교대 필터링된 대본을 기본값으로 일단 즉시 DB 저장 (락/에러 시 즉각 수동 UI 지원 보장)
     try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); }
     catch(e) { return; }
 
-    // 만약 제미니 키가 없다면 여기서 로컬 필터 대본으로 자동 수용하고 종료
     if (!geminiKey || baseScript.length === 0) return;
 
-  const userVoiceBio = await DB.getSetting('userVoiceBio') || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
+    const userVoiceBio = await DB.getSetting('userVoiceBio') || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
     const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 사용';
     const guideVoiceAcoustics = await DB.getSetting('guideVoiceAcoustics') || '120 Hz - 차분한 중저음 음역대 (남성 성향)';
 
@@ -2994,40 +3083,30 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       for (let offset = 0; offset < _cnt; offset += CHUNK_SIZE) {
         let chunk = _segInput.slice(offset, offset + CHUNK_SIZE);
         
-    var _sys = '당신은 대화 텍스트 분석기입니다. 어떠한 부연 설명이나 코드블록 마크다운을 금지하며 오직 요청한 텍스트 줄바꿈 포맷만 출력하세요.';
-            var _usr = '[임무] 다음 음성 대화 텍스트들을 분석하여 발화자가 "나(김용국)"인지 "' + counterpartName + '" 인지 판별하세요.\n' +
-              '반드시 제공된 세그먼트 개수 ' + chunk.length + '개 전체를 한 줄에 하나씩 아래 형식으로만 출력하세요.\n\n' +
-              '[출력 형식]\n' +
-              '[시작시간] 화자명: 대화내용\n\n' +
-              '[출력 예시]\n' +
-              '[0.0] 나: 여보세요?\n' +
-              '[2.5] ' + counterpartName + ': 김 부장, 어제 보낸 캐리어 테이프 견적서 확인했나?\n\n' +
-              '[판별 가이드 ("나"의 인적 이력)]\n' +
-              userVoiceBio + '\n' +
-              '- 어미 특징: ' + userVoiceTone + '\n' +
-              '- [중요 물리 데이터] 가이드 목소리 실측 주파수: ' + guideVoiceAcoustics + '\n\n' +
-              '[🔥 극도로 중요한 비즈니스 호칭 규칙]\n' +
-              '1. 가족이나 아주 친한 사적인 지인을 제외하고는, 업무상 대다수의 상대방들은 나(김용국)를 지칭할 때 주로 "김부장", "김부장님", "김팀장", "김팀장님"이라고 부릅니다.\n' +
-              '2. 따라서 대화문 내용에 "김부장(님)" 또는 "김팀장(님)"이라고 상대방을 부르거나 호명하는 발화가 나타난다면, 해당 말을 하는 발화자는 무조건 "상대방(' + counterpartName + ')"이며, 그 말을 듣는 대상(수신자)은 무조건 "나(김용국)"로 정밀하게 분리해 매핑하십시오. 절대 이 관계를 혼동하거나 반대로 매핑하지 마십시오.\n\n' +
-              '[상대방 디폴트 명칭]\n' +
-              '- 이름: ' + counterpartName + '\n\n' +
-              '[분석 원칙]\n' +
-              '1. 대화 진행 맥락, 호칭 규칙 및 제공된 "나"의 목소리 주파수 성향(' + guideVoiceAcoustics + ')과 일치하는 화자를 "나"로 할당하세요.\n' +
-              '2. 상대방은 무조건 "' + counterpartName + '"으로 균일하게 매핑해 주십시오.\n\n' +
-              '[데이터]\n' + JSON.stringify(chunk);
+        var _sys = '당신은 대화 텍스트 분석기입니다. 어떠한 부연 설명이나 코드블록 마크다운을 금지하며 오직 요청한 텍스트 줄바꿈 포맷만 출력하세요.';
+        var _usr = '[임무] 다음 음성 대화 텍스트들을 분석하여 발화자가 "나(김용국)"인지 "' + counterpartName + '" 인지 판별하세요.\n' +
+          '반드시 제공된 세그먼트 개수 ' + chunk.length + '개 전체를 한 줄에 하나씩 아래 형식으로만 출력하세요.\n\n' +
           '[출력 형식]\n' +
           '[시작시간] 화자명: 대화내용\n\n' +
           '[출력 예시]\n' +
           '[0.0] 나: 여보세요?\n' +
-          '[2.5] ' + counterpartName + ': 어 용국아.\n\n' +
+          '[2.5] ' + counterpartName + ': 김 부장, 어제 보낸 캐리어 테이프 견적서 확인했나?\n\n' +
           '[판별 가이드 ("나"의 인적 이력)]\n' +
           userVoiceBio + '\n' +
-          '- 어미 특징: ' + userVoiceTone + '\n\n' +
+          '- 어미 특징: ' + userVoiceTone + '\n' +
+          '- [중요 물리 데이터] 가이드 목소리 실측 주파수: ' + guideVoiceAcoustics + '\n\n' +
+          '[🔥 극도로 중요한 비즈니스 호칭 규칙]\n' +
+          '1. 가족이나 아주 친한 사적인 지인을 제외하고는, 업무상 대다수의 상대방들은 나(김용국)를 지칭할 때 주로 "김부장", "김부장님", "김팀장", "김팀장님"이라고 부릅니다.\n' +
+          '2. 따라서 대화문 내용에 "김부장(님)" 또는 "김팀장(님)"이라고 상대방을 부르거나 호명하는 발화가 나타난다면, 해당 말을 하는 발화자는 무조건 "상대방(\' + counterpartName + \')"이며, 그 말을 듣는 대상(수신자)은 무조건 "나(김용국)"로 정밀하게 분리해 매핑하십시오. 절대 이 관계를 혼동하거나 반대로 매핑하지 마십시오.\n\n' +
+          '[상대방 디폴트 명칭]\n' +
+          '- 이름: ' + counterpartName + '\n\n' +
+          '[분석 원칙]\n' +
+          '1. 대화 진행 맥락, 호칭 규칙 및 제공된 "나"의 목소리 주파수 성향(' + guideVoiceAcoustics + ')과 일치하는 화자를 "나"로 할당하세요.\n' +
+          '2. 상대방은 무조건 "' + counterpartName + '"으로 균일하게 매핑해 주십시오.\n\n' +
           '[데이터]\n' + JSON.stringify(chunk);
 
         var _raw = await AbacusAI.callLLM(_usr, _sys, 4000);
         if (_raw) {
-          // [초고도화 3단계] 정규식 파서 탑재 (JSON 파싱 에러 우회 및 100% 분할 성공)
           const lines = _raw.split('\n');
           lines.forEach(line => {
             const match = line.match(/^\[\s*([0-9.]+)\s*\]\s*([^:]+)\s*:\s*(.+)$/);
@@ -3036,7 +3115,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
               const speakerVal = match[2].trim();
               const textVal = match[3].trim();
               
-              // 표준 화자 매핑 정규화
               const isSpeakerMe = speakerVal === '나(김용국)' || speakerVal === '김용국' || speakerVal === '나';
               finalParsedScript.push({
                 speaker: isSpeakerMe ? '나' : counterpartName,
@@ -3048,7 +3126,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         }
       }
 
-      // 만약 정규식으로 파싱된 내용이 유효하다면 이 결과로 최종 덮어쓰기 저장
       if (finalParsedScript.length > 0) {
         finalParsedScript.forEach(function(item, i){
           if (typeof item.start !== 'number' || isNaN(item.start)) {
@@ -3727,6 +3804,7 @@ async function show() {
           const isBioRegistered = !!localStorage.getItem('mv_biometric_id'); 
           const geminiKey = AppState.get('geminiApiKey');
           const groqKey = AppState.get('groqApiKey');
+          const deepgramKey = await DB.getSetting('deepgramApiKey') || ''; // [추가]
           const groqModel = AppState.get('groqSttModel') || 'whisper-large-v3';
           const geminiModel = AppState.get('geminiModel') || 'gemini-3.5-flash';
           const memCount = await DB.getMemoryCount();
@@ -3817,16 +3895,31 @@ async function show() {
                 </div>
               </div>
 
-              <!-- AI -->
+            <!-- AI -->
               <div class="card">
                 <h3 class="text-sm font-semibold text-slate-400 mb-3">🤖 AI 설정</h3>
                 <div class="space-y-3">
+                  <!-- [추가] 1선 가동용 Deepgram API 입력 필드 -->
+                  <div>
+                    <div class="flex items-center gap-2 mb-1">
+                      <span style="color:#10b981">●</span>
+                      <label class="text-xs text-slate-400 font-bold">Deepgram API 키 (1선 - 권장)</label>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-1">물리적 목소리 파동 대조 분리 및 STT 동시 처리 ($200 무료)</p>
+                    <div style="position:relative;">
+                      <input type="password" id="deepgram-key" placeholder="Deepgram API 키 입력" value="${deepgramKey || ''}" style="padding-right:40px;"/>
+                      <button type="button" onclick="SettingsScreen.toggleVisibility('deepgram-key', this)"
+              style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:#a5b4fc;padding:4px;display:flex;align-items:center;">
+                        <i data-lucide="eye" style="width:16px;height:16px;"></i>
+                      </button>
+                    </div>
+                  </div>
                   <div>
                     <div class="flex items-center gap-2 mb-1">
                       <span style="color:#4285f4">●</span>
-                      <label class="text-xs text-slate-400">Gemini API 키</label>
+                      <label class="text-xs text-slate-400">Gemini API 키 (2선 우회용)</label>
                     </div>
-                    <p class="text-xs text-slate-500 mb-1">태그 생성 · 이미지 분석 · 음성 파싱에 사용</p>
+                    <p class="text-xs text-slate-500 mb-1">태그 생성 · 이미지 분석 · 2선 대본 파싱용</p>
                     <div style="position:relative;">
                       <input type="password" id="gemini-key" placeholder="AIza... 형식의 Gemini API 키" value="${geminiKey || ''}" style="padding-right:40px;"/>
                       <button type="button" onclick="SettingsScreen.toggleVisibility('gemini-key', this)"
@@ -3835,10 +3928,6 @@ async function show() {
                       </button>
                     </div>
                   </div>
-                  <div>
-                    <div class="flex items-center gap-2 mb-1">
-                      <span style="color:#f59e0b">●</span>
-                      <label class="text-xs text-slate-400">Groq API 키</label>
                     </div>
                     <p class="text-xs text-slate-500 mb-1">음성 전사(Whisper) · TTS(PlayAI)에 사용</p>
                     <div style="position:relative;">
@@ -4008,10 +4097,16 @@ async function show() {
     async function saveApiKeys() {
       const geminiKey = document.getElementById('gemini-key').value.trim();
       const groqKey = document.getElementById('groq-key').value.trim();
+      const deepgramKey = document.getElementById('deepgram-key').value.trim();
+      
       AppState.set('geminiApiKey', geminiKey);
       AppState.set('groqApiKey', groqKey);
+      AppState.set('deepgramApiKey', deepgramKey);
+      
       await DB.setSetting('geminiApiKey', geminiKey);
       await DB.setSetting('groqApiKey', groqKey);
+      await DB.setSetting('deepgramApiKey', deepgramKey);
+      
       UI.toast('API 키가 저장되었습니다', 'success');
     }
 
