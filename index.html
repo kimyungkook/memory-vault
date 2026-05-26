@@ -2935,7 +2935,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         }
 
         if (_blob) {
-          // 한국어(ko), Nova-2 모델 가동, 화자분리(diarize=true), 스마트문장포맷팅 활성화
           var response = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&language=ko&diarize=true&smart_format=true', {
             method: 'POST',
             headers: {
@@ -2970,7 +2969,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
               });
               if (curSeg) rawSegments.push(curSeg);
 
-              // [초고도화] 비즈니스 호칭 기반 동적 화자 추적 매퍼 (김부장/김팀장 호칭을 부르는 화자 인덱스를 김현수사장님으로 자동 추적)
               var counterpartIndex = null;
               for (var i = 0; i < rawSegments.length; i++) {
                 var t = rawSegments[i].text;
@@ -2994,13 +2992,12 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
                 };
               });
 
-              await DB.updateMemory(memoryId, { content: JSON.stringify(finalScript) });
+              await DB.updateMemory(memoryId, { content: JSON.stringify(finalScript), aiModelUsed: 'Deepgram' });
               UI.toast('🎯 [1선] Deepgram 성문 분석 대본 완료!', 'success');
               
-              // 시뮬레이션 토큰 누적 반영
               var durationSec = words.length > 0 ? (words[words.length - 1].end) : 0;
               await TokenTracker.addAudioUsage(durationSec);
-              return; // 1선 가동 완벽 성공 시 즉시 리턴 종료
+              return; 
             }
           } else {
             console.warn('[Deepgram] 크레딧 소진 또는 통신 에러 발생. 2선(Gemini) 전환합니다.');
@@ -3062,7 +3059,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       };
     }).filter(function(s){ return s.text.length > 0; });
 
-    try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); }
+    try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript), aiModelUsed: '로컬 오프라인' }); }
     catch(e) { return; }
 
     if (!geminiKey || baseScript.length === 0) return;
@@ -3133,7 +3130,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
           }
           item.start = Math.round(item.start * 10) / 10;
         });
-        await DB.updateMemory(memoryId, { content: JSON.stringify(finalParsedScript) });
+        await DB.updateMemory(memoryId, { content: JSON.stringify(finalParsedScript), aiModelUsed: 'Gemini' });
       }
     } catch(err) {
       console.warn('[Script] 제미니 정규 분석 오류, 로컬 이분화 대본 보존 완료');
@@ -3277,14 +3274,19 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
 
   <!-- ==================== SCREEN: VIEW MEMORY ==================== -->
   <script>
-  /**
-   * ViewMemoryScreen - View, edit, delete a single memory
+ /**
+   * ViewMemoryScreen - View, edit, delete a single memory (초고도화 화자 매핑 및 이원화 에디터 탑재)
    */
   window.ViewMemoryScreen = (() => {
-    let _ttsPlaying = false; // TTS 상태 변수 안전한 위치로 이동
+    let _ttsPlaying = false; 
+    let _isEditingMode = false; // 화자 다중 선택 편집 모드 제어 플래그
+    let _selectedSegIndexes = new Set(); // 다중 체크된 대화 인덱스들
+    let _currentMemoryId = null;
 
     async function show(params = {}) {
       if (!params.id) { App.navigate('home'); return; }
+      _currentMemoryId = params.id;
+      
       await HomeScreen._loadFolderMap();
       const memory = await DB.getMemory(params.id);
       if (!memory) { UI.toast('기억을 찾을 수 없습니다', 'error'); App.navigate('home'); return; }
@@ -3302,14 +3304,12 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         imageHtml = imgs.map(img => `<img src="${img}" class="w-full rounded-lg max-h-80 object-contain bg-slate-900 mb-2"/>`).join('');
       }
 
-      // 🚨 Multi-audio support (오디오 플레이어)
+      // Multi-audio support
       let audioHtml = '';
       if (memory.audioData) {
         const auds = Array.isArray(memory.audioData) ? memory.audioData : [memory.audioData];
-        // 오디오 플레이어 생성
         audioHtml = auds.map(aud => `<audio controls class="w-full mb-3" style="height: 44px; border-radius: 8px;" src="${aud}"></audio>`).join('');
       } else if (memory.type === 'voice') {
-        // 예전 에러 시절에 음성 데이터 없이 텍스트만 저장된 불량 메모를 위한 경고창
         audioHtml = `<div style="padding: 12px; background: rgba(239,68,68,0.15); color: #f87171; border-radius: 8px; font-size: 12px; margin-bottom: 12px;">⚠️ 오디오 데이터가 소실되어 텍스트만 보존된 메모입니다.</div>`;
       }
 
@@ -3333,59 +3333,112 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         `;
       }
 
-// ── 대본 뷰어 HTML 사전 계산 ──
-    let _contentHtml = null;
-    let _liveSegs = null;
-    if (memory.type === 'voice' && displayContent && displayContent.trim().startsWith('[')) {
-      try {
-        _liveSegs = JSON.parse(displayContent);
-        if (Array.isArray(_liveSegs) && _liveSegs.length > 0) {
-          const _fmt = (s) => {
-            const m = Math.floor((s||0)/60), sec = Math.floor((s||0)%60);
-            return String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
-          };
-          
-          // [개선] 여러 개의 창이 아닌, 카카오톡 스타일 단일 채팅방 구조 컨테이너
-          _contentHtml = `<div id="chat-room" style="display:flex; flex-direction:column; gap:16px; background:#151e2e; border-radius:16px; padding:18px; border:1px solid #1e293b; box-shadow:inset 0 4px 12px rgba(0,0,0,0.3); width:100%;">
-            ${_liveSegs.map((seg, i) => {
-              const isMe = seg.speaker === '나';
-              return isMe ? `
-                <!-- 우측 배치: 나(김용국) 말풍선 -->
-                <div style="display:flex; flex-direction:column; align-items:flex-end; align-self:flex-end; max-width:85%;">
-                  <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
-                    <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
-                    <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#818cf8; background:transparent; border:none; text-align:right; width:60px; outline:none; padding:0;"/>
-                  </div>
-                  <div style="background:#4f46e5; color:#ffffff; border-radius:12px 2px 12px 12px; padding:10px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
-                    <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#ffffff; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
-                  </div>
-                </div>
-              ` : `
-                <!-- 좌측 배치: 상대방 말풍선 -->
-                <div style="display:flex; flex-direction:column; align-items:flex-start; align-self:flex-start; max-width:85%;">
-                  <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
-                    <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#94a3b8; background:transparent; border:none; width:90px; outline:none; padding:0;"/>
-                    <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
-                  </div>
-                  <div style="background:#1e293b; color:#cbd5e1; border-radius:2px 12px 12px 12px; padding:10px 14px; border:1px solid #334155; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
-                    <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#e2e8f0; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
-                  </div>
-                </div>
-              `;
-            }).join('')}
-          </div>`;
+      // ── [요구사항 4] 시각적 활성 모델 시그널 지표 결정 ──
+      let signalBadgeHtml = '';
+      let isParsedDiarization = false;
+      if (memory.type === 'voice') {
+        isParsedDiarization = displayContent.trim().startsWith('[');
+        const activeModel = memory.aiModelUsed || '미분석 대기';
+        
+        let colorClass = 'bg-slate-800 text-slate-400 border-slate-700';
+        let statusText = '⚪ 수동 화자 분석 대기 중';
+        
+        if (isParsedDiarization) {
+          if (activeModel === 'Deepgram') {
+            colorClass = 'bg-emerald-950/50 text-emerald-400 border-emerald-500/40';
+            statusText = '🟢 Deepgram 1선 성문 분석 활성 작동';
+          } else if (activeModel === 'Gemini') {
+            colorClass = 'bg-indigo-950/50 text-indigo-400 border-indigo-500/40';
+            statusText = '🔵 Gemini 2선 우회 맥락 분석 작동';
+          } else {
+            colorClass = 'bg-amber-950/50 text-amber-400 border-amber-500/40';
+            statusText = '🟡 로컬 오프라인 턴-교대 분석 가동';
+          }
         }
-      } catch(e) { _contentHtml = null; }
-    }
-    if (!_contentHtml) {
-      _contentHtml = `<p class="text-sm whitespace-pre-wrap leading-relaxed">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>`;
-    }
+        signalBadgeHtml = `
+          <div class="border px-3 py-1.5 rounded-xl flex items-center gap-2 text-xs font-semibold ${colorClass}">
+            <span class="animate-pulse">●</span> ${statusText}
+          </div>
+        `;
+      }
+
+      // ── 대본 뷰어 HTML 사전 계산 ──
+      let _contentHtml = null;
+      let _liveSegs = null;
+      if (memory.type === 'voice' && isParsedDiarization) {
+        try {
+          _liveSegs = JSON.parse(displayContent);
+          if (Array.isArray(_liveSegs) && _liveSegs.length > 0) {
+            const _fmt = (s) => {
+              const m = Math.floor((s||0)/60), sec = Math.floor((s||0)%60);
+              return String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+            };
+            
+            _contentHtml = `
+              <!-- [요구사항 3] 화자 다중 선택 대화 편집용 패널 -->
+              ${_isEditingMode ? `
+                <div class="flex items-center justify-between p-3 mb-3 bg-slate-900 border border-indigo-500/40 rounded-xl fade-in">
+                  <span class="text-xs text-indigo-300 font-bold" id="sel-count-lbl">${_selectedSegIndexes.size}개 체크 선택됨</span>
+                  <div class="flex gap-1.5">
+                    <button onclick="ViewMemoryScreen.bulkAssignSpeaker('나')" class="text-[11px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white px-2.5 py-1.5 rounded-lg">나로 지정</button>
+                    <button onclick="ViewMemoryScreen.bulkAssignSpeaker('상대방')" class="text-[11px] font-bold bg-slate-700 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-lg">상대방 지정</button>
+                  </div>
+                </div>
+              ` : ''}
+
+              <div id="chat-room" style="display:flex; flex-direction:column; gap:16px; background:#151e2e; border-radius:16px; padding:18px; border:1px solid #1e293b; box-shadow:inset 0 4px 12px rgba(0,0,0,0.3); width:100%;">
+                ${_liveSegs.map((seg, i) => {
+                  const isMe = seg.speaker === '나';
+                  const showCheckbox = _isEditingMode ? `
+                    <input type="checkbox" data-sel-idx="${i}" ${_selectedSegIndexes.has(i) ? 'checked' : ''} onchange="ViewMemoryScreen.toggleSegSelection(${i})" style="width:16px; height:16px; cursor:pointer;" class="accent-indigo-500"/>
+                  ` : '';
+
+                  return isMe ? `
+                    <!-- 우측 배치: 나 -->
+                    <div style="display:flex; align-items:center; gap:8px; align-self:flex-end; max-width:90%;">
+                      ${showCheckbox}
+                      <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                        <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
+                          <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
+                          <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#818cf8; background:transparent; border:1px solid rgba(129,140,248,0.25); text-align:right; width:60px; outline:none; padding:1px 4px; border-radius:4px;"/>
+                        </div>
+                        <div style="background:#4f46e5; color:#ffffff; border-radius:12px 2px 12px 12px; padding:10px 14px; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
+                          <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#ffffff; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
+                        </div>
+                      </div>
+                    </div>
+                  ` : `
+                    <!-- 좌측 배치: 상대방 -->
+                    <div style="display:flex; align-items:center; gap:8px; align-self:flex-start; max-width:90%;">
+                      ${showCheckbox}
+                      <div style="display:flex; flex-direction:column; align-items:flex-start;">
+                        <div style="display:flex; gap:6px; align-items:center; margin-bottom:3px;">
+                          <input class="spk-input" data-idx="${i}" value="${_escapeHtml(seg.speaker)}" style="font-size:11px; font-weight:bold; color:#94a3b8; background:transparent; border:1px solid rgba(148,163,184,0.25); width:90px; outline:none; padding:1px 4px; border-radius:4px;"/>
+                          <span style="font-size:10px; color:#475569;">${_fmt(seg.start)}</span>
+                        </div>
+                        <div style="background:#1e293b; color:#cbd5e1; border-radius:2px 12px 12px 12px; padding:10px 14px; border:1px solid #334155; box-shadow:0 2px 8px rgba(0,0,0,0.2);">
+                          <textarea class="seg-text" data-idx="${i}" rows="1" style="width:100%; font-size:13.5px; color:#e2e8f0; background:transparent; border:none; outline:none; resize:none; overflow:hidden; padding:0; line-height:1.5;">${_escapeHtml(seg.text||'')}</textarea>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            `;
+          }
+        } catch(e) { _contentHtml = null; }
+      }
+      if (!_contentHtml) {
+        _contentHtml = `<p class="text-sm whitespace-pre-wrap leading-relaxed">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>`;
+      }
 
       const app = document.getElementById('app');
       app.innerHTML = `
         ${NavBar.render(memory.title || '기억 보기')}
         <div class="p-4 pb-24 nav-content-offset fade-in">
-          <div class="flex items-center justify-center mb-6 gap-3 p-2" style="background:#1e293b; border-radius:12px; border:1px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+          
+          <!-- 상단 툴바 메뉴 -->
+          <div class="flex items-center justify-center mb-4 gap-3 p-2" style="background:#1e293b; border-radius:12px; border:1px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
             <button onclick="ViewMemoryScreen.readAloud(${memory.id})" class="btn btn-secondary flex items-center gap-1 flex-1 justify-center" style="padding:8px" title="읽어주기">
               <span style="font-size:18px">🔊</span> <span style="font-size:13px">읽기</span>
             </button>
@@ -3397,8 +3450,30 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
             </button>
           </div>
 
+          <!-- [요구사항 2] 수동 화자 분석 시작 / 복구 제어바 (음성타입 메모일때만 노출) -->
+          ${memory.type === 'voice' ? `
+            <div class="flex gap-2 mb-4 justify-between items-center">
+              ${signalBadgeHtml}
+              <div class="flex gap-1.5">
+                <button onclick="ViewMemoryScreen.startManualDiarization(${memory.id})" class="bg-indigo-600 hover:bg-indigo-500 text-white px-2.5 py-1.5 rounded-lg text-xs font-bold">🎙️ 화자 분석시작</button>
+                ${isParsedDiarization ? `
+                  <button onclick="ViewMemoryScreen.restoreToPlainText(${memory.id})" class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-2.5 py-1.5 rounded-lg text-xs font-bold">📝 원상복구</button>
+                ` : ''}
+              </div>
+            </div>
+          ` : ''}
+
           <div class="space-y-4">
-            <h1 class="text-xl font-bold">${_escapeHtml(memory.title || '제목 없음')}</h1>
+            <div class="flex justify-between items-start gap-2">
+              <h1 class="text-xl font-bold flex-1">${_escapeHtml(memory.title || '제목 없음')}</h1>
+              <!-- [요구사항 3] 편집 시작 / 완료 제어 버튼 -->
+              ${isParsedDiarization ? `
+                <button onclick="ViewMemoryScreen.toggleEditingMode()" class="text-xs bg-slate-800 hover:bg-slate-700 text-indigo-400 px-2.5 py-1.5 rounded-lg font-bold border border-slate-700 flex-shrink-0">
+                  ${_isEditingMode ? '💾 편집완료' : '⚙️ 화자편집'}
+                </button>
+              ` : ''}
+            </div>
+
             <div class="flex items-center gap-2 text-sm text-slate-400 flex-wrap">
               <span>${memory.type === 'text' ? '📝' : memory.type === 'image' ? '🖼️' : memory.type === 'document' ? '📄' : '🎤'}</span>
               <span>${UI.formatDate(memory.createdAt)}</span>
@@ -3410,7 +3485,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
             ${audioHtml}
             ${docHtml}
 
-            <!-- 카카오톡 테마 단일 대화 패널 -->
+            <!-- 대화방 및 일반 글 출력 상자 -->
             <div class="w-full">
               ${_contentHtml}
             </div>
@@ -3425,7 +3500,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       UI.refreshIcons();
 
       if (_liveSegs) {
-        // [수정] 인풋 요소 직접 터치/클릭 즉시 편집 활성화 (가장 부드러운 모바일 입력방식 연동)
         document.querySelectorAll('.spk-input').forEach(inp => {
           inp.addEventListener('blur', async () => {
             const idx = parseInt(inp.dataset.idx);
@@ -3449,13 +3523,105 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
               await DB.updateMemory(memory.id, { content: JSON.stringify(_liveSegs) });
             } catch(e) {}
           });
-          // 로드하자마자 줄높이 정밀 자동 리사이징
           el.style.height = 'auto';
           el.style.height = (el.scrollHeight) + 'px';
         });
       }
       _loadRelatedMemories(memory);
-     }
+    }
+
+    // [요구사항 3] 화자 다중 선택 및 일괄 매핑 제어 기능 군
+    function toggleEditingMode() {
+      _isEditingMode = !_isEditingMode;
+      if (!_isEditingMode) {
+        _selectedSegIndexes.clear();
+      }
+      show({ id: _currentMemoryId });
+    }
+
+    function toggleSegSelection(index) {
+      if (_selectedSegIndexes.has(index)) {
+        _selectedSegIndexes.delete(index);
+      } else {
+        _selectedSegIndexes.add(index);
+      }
+      const lbl = document.getElementById('sel-count-lbl');
+      if (lbl) lbl.textContent = _selectedSegIndexes.size + '개 체크 선택됨';
+    }
+
+    async function bulkAssignSpeaker(targetSpeaker) {
+      if (_selectedSegIndexes.size === 0) {
+        UI.toast('지정할 대화를 먼저 체크해 주세요', 'info');
+        return;
+      }
+      const memory = await DB.getMemory(_currentMemoryId);
+      if (!memory) return;
+
+      try {
+        const segs = JSON.parse(memory.content);
+        if (Array.isArray(segs)) {
+          // [초고도화 4번 요구사항] 파일명 기반 상대방 이름 획득 연산 적용
+          let counterpartName = '상대방';
+          if (memory.title) {
+            let nameMatch = memory.title.match(/(?:녹음|통화)\s+([가-힣]{2,4}(?:부장님|과장님|대리님|부장|과장|팀장|대리|사원|부인|자기)?)/);
+            if (nameMatch) counterpartName = nameMatch[1].trim();
+          }
+
+          const resolvedSpeaker = targetSpeaker === '나' ? '나' : counterpartName;
+          
+          _selectedSegIndexes.forEach(idx => {
+            if (segs[idx]) segs[idx].speaker = resolvedSpeaker;
+          });
+
+          await DB.updateMemory(_currentMemoryId, { content: JSON.stringify(segs) });
+          UI.toast(_selectedSegIndexes.size + '개 대화 화자 일괄 매핑 완료!', 'success');
+          
+          _selectedSegIndexes.clear();
+          show({ id: _currentMemoryId });
+        }
+      } catch(e) {
+        UI.toast('오류가 발생했습니다.', 'error');
+      }
+    }
+
+    // [요구사항 2] 수동 화자 분석 개시 (강제 대본 변환 재시도)
+    async function startManualDiarization(id) {
+      UI.showLoading('AI 화자 분석 진행 중...');
+      const m = await DB.getMemory(id);
+      if (!m) { UI.hideLoading(); return; }
+
+      // convertToScript 호출을 통해 1선/2선 파이프라인 작동
+      await window.convertToScript(m.id, m.audioData, m.title, [], m.content);
+      UI.hideLoading();
+      
+      _isEditingMode = false;
+      _selectedSegIndexes.clear();
+      show({ id });
+    }
+
+    // [요구사항 2] 화자 말풍선 상태에서 단일 일반 텍스트 상태로의 완벽한 롤백 복구
+    async function restoreToPlainText(id) {
+      const m = await DB.getMemory(id);
+      if (!m) return;
+      
+      UI.confirm('대본 원상복구', '말풍선 대화 형태를 취소하고 일반 텍스트 문단으로 복구하시겠습니까?', async () => {
+        try {
+          const segs = JSON.parse(m.content);
+          if (Array.isArray(segs)) {
+            const plainText = segs.map(s => `${s.speaker}: ${s.text}`).join('\n');
+            await DB.updateMemory(id, { content: plainText, aiModelUsed: 'None' });
+            UI.toast('일반 텍스트 상태로 복구되었습니다.', 'success');
+            
+            _isEditingMode = false;
+            _selectedSegIndexes.clear();
+            show({ id });
+          }
+        } catch(e) {
+          UI.toast('이미 일반 텍스트 상태이거나 변환할 수 없습니다.', 'info');
+        }
+      }, '복구');
+    }
+
     async function _loadRelatedMemories(memory) {
       const keywords = [
         ...(memory.title || '').split(/\s+/).filter(w => w.length > 1),
@@ -3562,7 +3728,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     function readAloud(id) {
       if (!('speechSynthesis' in window)) { UI.toast('TTS 미지원 기기', 'error'); return; }
       
-      // 이미 말하고 있다면 즉시 중지
       if (window.speechSynthesis.speaking || _ttsPlaying) {
         window.speechSynthesis.cancel();
         _ttsPlaying = false;
@@ -3578,7 +3743,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         }
         if (!text.trim()) { UI.toast('읽을 내용이 없습니다', 'info'); return; }
         
-        window.speechSynthesis.cancel(); // 초기화
+        window.speechSynthesis.cancel(); 
 
         const playTTS = () => {
           const utt = new SpeechSynthesisUtterance(text);
@@ -3594,7 +3759,6 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
           window.speechSynthesis.speak(utt);
         };
 
-        // 목소리 로딩 대기 (안드로이드 대응)
         if (window.speechSynthesis.getVoices().length === 0) {
           window.speechSynthesis.onvoiceschanged = () => {
             playTTS();
@@ -3606,10 +3770,9 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       });
     }
 
-    return { show, edit, remove, downloadDoc, downloadDocByIndex, readAloud };
+    return { show, edit, remove, downloadDoc, downloadDocByIndex, readAloud, toggleEditingMode, toggleSegSelection, bulkAssignSpeaker, startManualDiarization, restoreToPlainText };
   })();
-  </script>
-
+ </script>
   <!-- ==================== SCREEN: FOLDERS ==================== -->
   <script>
   /**
