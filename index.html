@@ -438,10 +438,11 @@
   };
   </script>
 
-  <!-- ==================== STATE MODULE ==================== -->
+ <!-- ==================== STATE MODULE ==================== -->
   <script>
   /**
    * AppState - Global state management with event emitter
+   * (수정됨: 앱 초기화 시 DB에 저장된 API 키들을 메모리에 완벽히 복원하도록 누락 로직 추가)
    */
   window.AppState = (() => {
     const state = {
@@ -457,10 +458,12 @@
       abacusApiKey: '',
       geminiApiKey: '',
       groqApiKey: '',
+      deepgramApiKey: '',
       groqSttModel: 'whisper-large-v3',
       geminiModel: 'gemini-3.5-flash',
       geminiProModel: 'gemini-2.5-flash-preview-05-20',
-      isStealthMode: false
+      isStealthMode: false,
+      apiLocked: false
     };
     const listeners = {};
 
@@ -480,24 +483,35 @@
       return () => { listeners[key] = listeners[key].filter(f => f !== fn); };
     }
 
+    // 앱 실행 시 단 한 번 호출되어 DB의 데이터를 앱 메모리에 적재하는 핵심 함수
     async function loadSettings() {
       const pinHash = await DB.getSetting('pinHash');
       const theme = await DB.getSetting('theme');
       const encryptionEnabled = await DB.getSetting('encryptionEnabled');
+      
+      // 1. DB에서 키값 읽어오기
       const abacusApiKey = await DB.getSetting('abacusApiKey');
-     const geminiApiKey = await DB.getSetting('geminiApiKey');
+      const geminiApiKey = await DB.getSetting('geminiApiKey');
       const groqApiKey = await DB.getSetting('groqApiKey');
+      const deepgramApiKey = await DB.getSetting('deepgramApiKey');
+      
       const groqSttModel = await DB.getSetting('groqSttModel');
       const geminiModel = await DB.getSetting('geminiModel');
-      
-      // [추가] Deepgram API 키 로드
-      const deepgramApiKey = await DB.getSetting('deepgramApiKey');
-      if (deepgramApiKey) state.deepgramApiKey = deepgramApiKey;
-
-      // [추가] API 락(Lock) 상태값 로드
       const apiLocked = await DB.getSetting('apiLocked');
-      state.apiLocked = !!apiLocked;
 
+      // 2. 읽어온 값들을 state에 강제 결속 (이 부분이 누락되어 새로고침 시 날아갔던 것임)
+      if (theme) state.theme = theme;
+      if (encryptionEnabled !== null) state.encryptionEnabled = encryptionEnabled;
+      
+      if (abacusApiKey) state.abacusApiKey = abacusApiKey;
+      if (geminiApiKey) state.geminiApiKey = geminiApiKey;
+      if (groqApiKey) state.groqApiKey = groqApiKey;
+      if (deepgramApiKey) state.deepgramApiKey = deepgramApiKey;
+      
+      if (groqSttModel) state.groqSttModel = groqSttModel;
+      if (geminiModel) state.geminiModel = geminiModel;
+      
+      state.apiLocked = !!apiLocked;
       state.isLocked = !!pinHash;
       if (!pinHash) state.isLocked = false;
     }
@@ -2887,441 +2901,226 @@ window.HomeScreen = (() => {
   })();
 </script>
 <!-- ==================== SCRIPT CONVERTER ==================== -->
-  <script>
-  /**
-   * convertToScript - 음성→화자분리 대본 변환 파이프라인
-   * 3가지 경로 모두 이 함수 하나로 처리
-   */
+<script>
+/**
+ * convertToScript - 음성→화자분리 대본 변환 파이프라인 (1시간 장기 통화 지원 초고도화)
+ * 1. 파일명에서 대상 이름 추출 (상대방 단어 폐기)
+ * 2. Deepgram 스피커 증식 억제 (Top 2 화자 병합 클러스터링)
+ */
+
+window._koreanSTTFix = function(text) {
+  if (!text) return text;
+  var t = text.replace(/(\d+)\s+(박스|개|장|개월|번|회|명|팔레트|파렛|롤|키로|미터)/g, '$1$2');
+  var bizDict = [['납폼','납품'],['발쭈','발주'],['단까','단가'],['알겟습니다','알겠습니다']];
+  bizDict.forEach(p => t = t.replace(new RegExp(p[0], 'g'), p[1]));
+  return t.replace(/\s{2,}/g, ' ').trim();
+};
+
+window._koreanSTTFixWithGemini = async function(rawText, title) {
+  var geminiKey = AppState.get('geminiApiKey');
+  if (!geminiKey || !rawText || rawText.length < 20) return rawText;
+  try {
+    var sys = '당신은 통화 녹취록 교정 전문가입니다. 오직 교정된 텍스트만 출력하세요.';
+    var usr = '원문의 의미나 화자는 절대 바꾸지 말고, 오인식된 비즈니스 단어와 숫자만 자연스럽게 교정하세요.\n[원문]\n' + rawText;
+    var result = await AbacusAI.callLLM(usr, sys, 2000);
+    return (result && result.trim()) ? result.trim() : rawText;
+  } catch(e) {
+    return rawText;
+  }
+};
+
 window.convertToScript = async function(memoryId, audioSource, title, segments, existingText) {
-    if (!memoryId) return;
-    var groqKey   = AppState.get('groqApiKey');
-    var geminiKey = AppState.get('geminiApiKey');
-    var deepgramKey = AppState.get('deepgramApiKey');
-    var textToUse = existingText || '';
-    var segsToUse = (Array.isArray(segments) && segments.length > 0) ? segments : [];
+  if (!memoryId) return;
 
-    // 상대방 이름 미리 추출
-   // [초고도화] 상대방 이름 정밀 추출 — 회사명/법인명/개인명 모두 커버
-    let counterpartName = '상대방';
-    if (title) {
-      // 패턴1: (주)회사명, 주식회사명, ㈜회사명
-      let compMatch = title.match(/[\(\（]주[\)\）]\s*([^\s_\-\.]+)/i) ||
-                      title.match(/주식회사\s*([^\s_\-\.]+)/i) ||
-                      title.match(/㈜\s*([^\s_\-\.]+)/i);
-      if (compMatch) {
-        counterpartName = '(주)' + compMatch[1].trim();
-      } else {
-        // 패턴2: 한글 인명 + 직함
-        let nameMatch = title.match(/(?:녹음|통화)[_ ]+([가-힣]{2,5}(?:부장님?|과장님?|대리님?|팀장님?|사장님?|차장님?|이사님?|사원)?)/);
-        if (nameMatch) {
-          counterpartName = nameMatch[1].trim();
-        } else {
-          // 패턴3: 파일명 전체에서 회사명/이름 추출
-          let parts = title.split(/[_\s\-\.]+/);
-          for (let p of parts) {
-            // 날짜/숫자 제외, 한글 2글자 이상
-            if (p.match(/^[가-힣A-Za-z]{2,}$/) && !p.match(/^(통화|녹음|메모|음성|파일)$/)) {
-              counterpartName = p.trim();
-              break;
-            }
-          }
-        }
-      }
+  // ==========================================
+  // [초고도화 1] 대상 이름 완벽 추출 ("상대방" 단어 원천 차단)
+  // ==========================================
+  let targetName = '통화대상'; 
+  if (title) {
+    // 날짜, 숫자, 특수기호, 쓸데없는 단어 전부 날림
+    let cleanTitle = title.replace(/통화|녹음|파일|메모|[0-9\-_]/g, ' ').trim();
+    let nameParts = cleanTitle.split(/\s+/).filter(w => w.length > 0 && !w.match(/^(am|pm|오전|오후)$/i));
+    if (nameParts.length > 0) {
+      targetName = nameParts[0]; // 파일명 앞의 "조목희", "대일", "권구과장" 등을 확정
+    } else {
+      targetName = title.substring(0, 6); // 실패 시 파일명 앞 6글자 사용
     }
-      if (nameMatch) {
-        counterpartName = nameMatch[1].trim();
-      } else {
-        let parts = title.split(/[_\s]+/);
-        for (let p of parts) {
-          if (p.match(/[가-힣]{2,4}(부장|과장|대리|팀장|자기|부인)/)) {
-            counterpartName = p.trim();
-            break;
-          }
-        }
-      }
-    }
+  }
 
-    // ==========================================
-    // [1선] Deepgram 물리 성문 대조 화자 분리 API 가동
-    // ==========================================
-    if (deepgramKey && audioSource && !AppState.get('apiLocked')) {
-      try {
-        var _blob;
-        if (audioSource instanceof Blob) {
-          _blob = audioSource;
-        } else if (typeof audioSource === 'string' && audioSource.indexOf('base64') > -1) {
-          var _arr  = audioSource.split(',');
-          var _mime = (_arr[0].match(/:(.*?);/) || [])[1] || 'audio/webm';
-          var _bstr = atob(_arr[1]);
-          var _u8   = new Uint8Array(_bstr.length);
-          for (var _i = 0; _i < _bstr.length; _i++) _u8[_i] = _bstr.charCodeAt(_i);
-          _blob = new Blob([_u8], { type: _mime });
-        }
+  var groqKey   = AppState.get('groqApiKey');
+  var geminiKey = AppState.get('geminiApiKey');
+  var deepgramKey = AppState.get('deepgramApiKey');
+  var textToUse = existingText || '';
+  var segsToUse = (Array.isArray(segments) && segments.length > 0) ? segments : [];
 
-        if (_blob) {
-          // 한국어(ko), Nova-2 모델 가동, 화자분리(diarize=true), 스마트문장포맷팅 활성화
-          var response = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&language=ko&diarize=true&smart_format=true&utterances=true&utt_split=0.8', {
-            method: 'POST',
-            headers: {
-              'Authorization': 'Token ' + deepgramKey,
-              'Content-Type': _blob.type || 'audio/webm'
-            },
-            body: _blob
-          });
-
-          if (response.ok) {
-            var data = await response.json();
-            var words = data.results?.channels?.[0]?.alternatives?.[0]?.words || [];
-
-            if (words.length > 0) {
-              var rawSegments = [];
-              var curSeg = null;
-
-              // [지침 A] 침묵 간격(Silence Gap) 0.8초 기반 강제 물리 세그먼트 분할
-          const SILENCE_GAP_THRESHOLD = 0.8;
-          words.forEach(w => {
-            var wordText = w.punctuated_word || w.word;
-            const speakerChanged = curSeg && (curSeg.speakerIndex !== w.speaker);
-            const silenceGap    = curSeg && ((w.start - curSeg.end) >= SILENCE_GAP_THRESHOLD);
-
-            if (!curSeg || speakerChanged || silenceGap) {
-              if (curSeg) rawSegments.push(curSeg);
-              curSeg = {
-                speakerIndex: w.speaker,
-                text:  wordText,
-                start: w.start,
-                end:   w.end
-              };
-            } else {
-              curSeg.text += (wordText.match(/^[가-힣A-Za-z0-9]/) ? ' ' : '') + wordText;
-              curSeg.end = w.end;
-            }
-          });
-          if (curSeg) rawSegments.push(curSeg);
-
-          // [초고도화 v2] 피치 에너지 기반 화자 인덱스 결정 + 호칭 규칙 병행 적용
-              var counterpartIndex = null;
-              
-              // Step A: 호칭 규칙 (최우선)
-              for (var i = 0; i < rawSegments.length; i++) {
-                var t = rawSegments[i].text;
-                if (t.includes('김부장') || t.includes('김팀장') ||
-                    t.includes('김 부장') || t.includes('김 팀장') ||
-                    t.includes('넥스팩') || t.includes('nexpack')) {
-                  // "저희 넥스팩인데요" → 이 말 하는 사람이 나(김용국)
-                  counterpartIndex = rawSegments[i].speakerIndex === 0 ? 1 : 0;
-                  break;
-                }
-                if (t.includes('김부장') || t.includes('김팀장')) {
-                  counterpartIndex = rawSegments[i].speakerIndex;
-                  break;
-                }
-              }
-
-              // Step B: 피치 분포 기반 화자 인덱스 결정 (호칭 미탐지 시)
-              if (counterpartIndex === null && words.length > 0) {
-                // 각 speaker별 평균 pitch confidence 비교
-                var speakerPitchMap = {};
-                words.forEach(function(w) {
-                  var spk = String(w.speaker);
-                  if (!speakerPitchMap[spk]) speakerPitchMap[spk] = [];
-                  // confidence가 낮을수록 전화 너머 (압축된 고음)
-                  speakerPitchMap[spk].push(w.confidence || 0.5);
-                });
-                var speakerIds = Object.keys(speakerPitchMap);
-                if (speakerIds.length >= 2) {
-                  // confidence 낮은 쪽 = 전화 너머 = 상대방
-                  var avgConf = {};
-                  speakerIds.forEach(function(spk) {
-                    var arr = speakerPitchMap[spk];
-                    avgConf[spk] = arr.reduce(function(a,b){return a+b;}, 0) / arr.length;
-                  });
-                  // confidence 낮은 speaker = 상대방
-                  counterpartIndex = speakerIds.reduce(function(a, b) {
-                    return avgConf[a] < avgConf[b] ? a : b;
-                  });
-                  console.log('[PitchMap] 화자 confidence:', JSON.stringify(avgConf), '→ 상대방 인덱스:', counterpartIndex);
-                }
-              }
-
-              // Step C: 최후 fallback — 첫 발화자가 상대방인 경우 多 (전화 수신 상황)
-              // "나(김용국)"는 전화를 받는 입장이 많음 → 먼저 말한 쪽이 상대방
-              if (counterpartIndex === null) {
-                counterpartIndex = rawSegments[0] ? rawSegments[0].speakerIndex : 1;
-              }
-
-              // [Idea B] 1선 Deepgram 물리 분할 성공 → 피치 기반 1차 매핑
-              var prelimScript = rawSegments.map(s => {
-                var isMe = s.speakerIndex !== counterpartIndex;
-                return {
-                  speaker: isMe ? '나' : counterpartName,
-                  text: s.text,
-                  start: Math.round(s.start * 10) / 10
-                };
-              });
-              await DB.updateMemory(memoryId, { content: JSON.stringify(prelimScript), aiModelUsed: 'Deepgram' });
-
-              var durationSec = words.length > 0 ? (words[words.length - 1].end) : 0;
-              await TokenTracker.addAudioUsage(durationSec);
-
-              // [Idea B] Gemini 화자명 교정 레이어 — 1선 성공 후에도 반드시 통과
-              if (geminiKey && rawSegments.length > 0) {
-                try {
-                  const _dgBio       = await DB.getSetting('userVoiceBio')       || '이름: 김용국, 넥스팩 영업부장';
-                  const _dgTone      = await DB.getSetting('userVoiceTone')      || '차분한 중저음';
-                  const _dgAcoustics = await DB.getSetting('guideVoiceAcoustics')|| '120Hz - 바리톤 (남성)';
-
-                  var _dgSegInput = rawSegments
-                    .map(s => ({ start: Math.round(s.start * 10) / 10, text: (s.text || '').trim() }))
-                    .filter(s => s.text.length > 0);
-
-                  const DG_CHUNK = 15;
-                  let dgFinal = [];
-
-                  for (let dgOff = 0; dgOff < _dgSegInput.length; dgOff += DG_CHUNK) {
-                    const dgChunk = _dgSegInput.slice(dgOff, dgOff + DG_CHUNK);
-
-                    const _dgSys = [
-                      '당신은 음성 대본 화자 이름표 교정 전문기입니다.',
-                      '【절대 금지】세그먼트 병합/요약/생략/원문수정/마크다운 출력 완전 금지',
-                      '【허용】임시 번호를 실제 화자 이름으로 교체, 혼재 시 2줄 분리(Split)',
-                      '【출력 형식 고정】[시작시간] 화자명: 대화내용 — 이 외 일체 출력 금지'
-                    ].join('\n');
-
-                    const _dgUsr = [
-                      '[임무] 세그먼트 임시 번호를 실제 화자 이름으로 교체하세요.',
-                      '입력 수: ' + dgChunk.length + '개 — 출력 줄 수 반드시 ' + dgChunk.length + '줄 이상',
-                      '',
-                      '[출력 예시]',
-                      '[0.0] 나: 여보세요?',
-                      '[2.5] ' + counterpartName + ': 김 부장, 어제 견적서 확인했나?',
-                      '',
-                      '["나(김용국)" 성문 고정 식별 락]',
-                      _dgBio,
-                      '- 말투: ' + _dgTone,
-                      '- 주파수: ' + _dgAcoustics,
-                      '',
-                      '[화자 판별 절대 규칙]',
-                      '규칙1(최우선): "김부장","김부장님","김팀장","김팀장님" 포함 세그먼트 → 화자="' + counterpartName + '" (예외없음)',
-                      '규칙2: "나"는 상대방을 직함으로 존칭, 영업/납기/품질 주도',
-                      '규칙3: 질문+답 혼재 감지 시 → 반드시 2줄로 분리 반환',
-                      '',
-                      '[분석 대상 세그먼트 — 병합 절대 금지]',
-                      dgChunk.map((s, i) => '[' + s.start.toFixed(1) + '] 세그먼트_' + (dgOff + i) + ': ' + s.text).join('\n')
-                    ].join('\n');
-
-                    const _dgRaw = await AbacusAI.callLLM(_dgUsr, _dgSys, 4000);
-                    if (_dgRaw) {
-                      _dgRaw.split('\n').forEach(line => {
-                        const match = line.match(/^\[\s*([0-9.]+)\s*\]\s*([^:]+)\s*:\s*(.+)$/);
-                        if (match) {
-                          const sv = match[2].trim();
-                          dgFinal.push({
-                            speaker: (sv === '나(김용국)' || sv === '김용국' || sv === '나') ? '나' : counterpartName,
-                            text:  match[3].trim(),
-                            start: parseFloat(match[1]) || 0.0
-                          });
-                        }
-                      });
-                    }
-                  }
-
-                  if (dgFinal.length > 0) {
-                    await DB.updateMemory(memoryId, { content: JSON.stringify(dgFinal), aiModelUsed: 'Deepgram+Gemini' });
-                    UI.toast('🎯 Deepgram+Gemini 하이브리드 대본 완료!', 'success');
-                  } else {
-                    UI.toast('🎯 [1선] Deepgram 성문 분석 대본 완료!', 'success');
-                  }
-                } catch(dgGeminiErr) {
-                  console.warn('[Idea B] Gemini 교정 실패 → Deepgram 1차 결과 보존:', dgGeminiErr);
-                  UI.toast('🎯 [1선] Deepgram 성문 분석 대본 완료!', 'success');
-                }
-              } else {
-                UI.toast('🎯 [1선] Deepgram 성문 분석 대본 완료!', 'success');
-              }
-              return;
-            }
-          } else {
-            console.warn('[Deepgram] 크레딧 소진 또는 통신 에러 발생. 2선(Gemini) 전환합니다.');
-          }
-        }
-      } catch(dgErr) {
-        console.warn('[Deepgram] 1선 실패. 2선(Gemini) 자동 우회 작동:', dgErr);
-      }
-    }
-
-    // ==========================================
-    // [2선] 만약 1선(Deepgram) 실패 시 Gemini 우회 복구 프로세스 가동
-    // ==========================================
-    if (segsToUse.length === 0 && audioSource && groqKey) {
-      try {
-        var _blob;
-        if (audioSource instanceof Blob) {
-          _blob = audioSource;
-        } else if (typeof audioSource === 'string' && audioSource.indexOf('base64') > -1) {
-          var _arr  = audioSource.split(',');
-          var _mime = (_arr[0].match(/:(.*?);/) || [])[1] || 'audio/webm';
-          var _bstr = atob(_arr[1]);
-          var _u8   = new Uint8Array(_bstr.length);
-          for (var _i = 0; _i < _bstr.length; _i++) _u8[_i] = _bstr.charCodeAt(_i);
-          _blob = new Blob([_u8], { type: _mime });
-        }
-        if (_blob) {
-          var _res = await AbacusAI.transcribeAudio(_blob);
-          if (_res) {
-            if (_res.text && !textToUse) textToUse = _res.text;
-            if (_res.segments && _res.segments.length > 0) segsToUse = _res.segments;
-          }
-        }
-      } catch(e) { console.warn('[Script] Groq 재호출 실패:', e.message); }
-    }
-
-    if (!textToUse && segsToUse.length === 0) return;
-
-    if (segsToUse.length === 0 && textToUse) {
-      var _sents = textToUse.split(/\.\s+|\n/).filter(function(s){ return s.trim().length > 2; });
-      segsToUse = _sents.length > 1
-        ? _sents.map(function(s, i){ return { start: i * 4.0, text: s.trim() }; })
-        : [{ start: 0.0, text: textToUse.trim() }];
-    }
-
-  let currentLocalSpeaker = '나';
-    var baseScript = segsToUse.map(function(s, i) {
-      var textVal = (s.text || '').trim();
-
-      // [수정] 세그먼트에 speaker 필드가 있으면 활용
-      // "녹음", "Speaker", "speaker_0" 같은 기본값은 무시
-      var rawSpk = (s.speaker || '').trim();
-      var isValidSpk = rawSpk.length > 0
-        && !rawSpk.match(/^(녹음|speaker|speaker_\d+|화자|unknown|undefined)$/i);
-
-      var assignedSpeaker;
-      if (isValidSpk) {
-        // 유효한 화자명이 이미 있으면 그대로 사용
-        assignedSpeaker = rawSpk;
-      } else {
-        // 없으면 교대 배정
-        if (i > 0) {
-          var prevText = (segsToUse[i-1].text || '');
-          if (prevText.includes('?') || textVal.includes('?') ||
-              prevText.length > 40 || i % 2 === 1) {
-            currentLocalSpeaker = (currentLocalSpeaker === '나') ? counterpartName : '나';
-          }
-        }
-        assignedSpeaker = currentLocalSpeaker;
-      }
-
-      return {
-        speaker: assignedSpeaker,
-        text: textVal,
-        start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0
-      };
-    }).filter(function(s){ return s.text.length > 0; });
-
-    try { await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); }
-    catch(e) { return; }
-
-    if (!geminiKey || baseScript.length === 0) return;
-
-    const userVoiceBio = await DB.getSetting('userVoiceBio') || '이름: 김용국\n직장: 넥스팩 (제조업, 캐리어테잎 제작)\n직책: 영업부 부장 & 팀장';
-    const userVoiceTone = await DB.getSetting('userVoiceTone') || '차분한 중저음, 끝에 \'넵\', \'아 예\', \'자기야\' 등의 호칭 사용';
-    const guideVoiceAcoustics = await DB.getSetting('guideVoiceAcoustics') || '120 Hz - 차분한 중저음 음역대 (남성 성향)';
-
+  // ==========================================
+  // [초고도화 2] Deepgram 1시간 통화 지원 클러스터링 엔진 가동
+  // ==========================================
+  if (deepgramKey && audioSource && !AppState.get('apiLocked')) {
     try {
-      var _segInput = segsToUse.map(function(s){
-        return { start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0, text: (s.text||'').trim() };
-      }).filter(function(s){ return s.text.length > 0; });
-
-      var _cnt = _segInput.length;
-      const CHUNK_SIZE = 15;
-      let finalParsedScript = [];
-
-      for (let offset = 0; offset < _cnt; offset += CHUNK_SIZE) {
-        let chunk = _segInput.slice(offset, offset + CHUNK_SIZE);
-        
-       // [지침 B 강제 적용] 재합성/병합/요약 절대 금지 — 이름표 매핑 + 미세 분할만 허용
-        var _sys = [
-          '당신은 음성 대본 화자 이름표 교정 전문기입니다.',
-          '',
-          '【절대 금지 명령 — 위반 시 전체 응답 폐기】',
-          '  FORBIDDEN-1: 입력된 세그먼트를 병합(Merge)하거나 요약(Summarize)하는 행위 완전 금지',
-          '  FORBIDDEN-2: 입력 세그먼트 개수보다 출력 줄 수가 적어지는 것 완전 금지',
-          '  FORBIDDEN-3: 대화 원문을 수정, 생략, 재구성하는 행위 완전 금지',
-          '  FORBIDDEN-4: 분석 코멘트, 서문, 마크다운, 코드블록 출력 완전 금지',
-          '',
-          '【허용 작업 — 이것만 수행】',
-          '  ALLOW-1: 각 세그먼트의 임시 번호를 실제 화자 이름("나" 또는 상대방 이름)으로 교체',
-          '  ALLOW-2: 하나의 세그먼트 내부에 두 화자 발언이 혼재 시 → 해당 줄만 2줄로 분리(Split) 허용',
-          '  ALLOW-3: 출력 형식 "[시작시간] 화자명: 대화내용" 이것만 허용'
-        ].join('\n');
-
-        var _usr = [
-          '[임무] 아래 세그먼트 목록의 임시 화자 번호를 실제 이름으로 교체하세요.',
-          '입력 세그먼트 수: ' + chunk.length + '개 — 출력 줄 수는 반드시 ' + chunk.length + '줄 이상이어야 합니다.',
-          '세그먼트 병합은 어떤 경우에도 허용되지 않습니다.',
-          '',
-          '[출력 형식 — 이 외 일체 출력 금지]',
-          '[시작시간] 화자명: 대화내용',
-          '',
-          '[출력 예시]',
-          '[0.0] 나: 여보세요?',
-          '[2.5] ' + counterpartName + ': 김 부장, 어제 견적서 확인했나?',
-          '[4.1] 나: 예, 확인했습니다.',
-          '',
-          '["나(김용국)" 성문 고정 식별 락 — 화자 판별의 절대 기준]',
-          userVoiceBio,
-          '- 말투/어미 특징: ' + userVoiceTone,
-          '- 실측 음성 주파수 성향: ' + guideVoiceAcoustics,
-          '',
-          '[화자 판별 절대 규칙]',
-          '규칙1 (최우선): 세그먼트 내에 "김부장", "김부장님", "김팀장", "김팀장님" 단어 포함 시',
-          '        → 해당 세그먼트 화자 = 반드시 "' + counterpartName + '" (상대방이 나를 부르는 것)',
-          '        → 이 규칙은 주파수/맥락 판단보다 우선하며 예외 없음',
-          '규칙2: "나"는 상대방을 "사장님", "부장님", "차장님" 등 직함으로 존칭하며 영업/납기/품질 주도',
-          '규칙3 (분리 트리거): 한 세그먼트 내에서 질문과 답, 또는 화자 전환 어휘가 동시 탐지 시',
-          '        → 해당 세그먼트를 반드시 2줄로 분리하여 반환',
-          '',
-          '[분석 대상 세그먼트 — 병합 절대 금지, 이름표만 교체]',
-          chunk.map(function(s, i) {
-            return '[' + s.start.toFixed(1) + '] 세그먼트_' + (offset + i) + ': ' + (s.text || '').trim();
-          }).join('\n')
-        ].join('\n');
-
-        var _raw = await AbacusAI.callLLM(_usr, _sys, 4000);
-        if (_raw) {
-          const lines = _raw.split('\n');
-          lines.forEach(line => {
-            const match = line.match(/^\[\s*([0-9.]+)\s*\]\s*([^:]+)\s*:\s*(.+)$/);
-            if (match) {
-              const startVal = parseFloat(match[1]);
-              const speakerVal = match[2].trim();
-              const textVal = match[3].trim();
-              
-              const isSpeakerMe = speakerVal === '나(김용국)' || speakerVal === '김용국' || speakerVal === '나';
-              finalParsedScript.push({
-                speaker: isSpeakerMe ? '나' : counterpartName,
-                text: textVal,
-                start: isNaN(startVal) ? 0.0 : startVal
-              });
-            }
-          });
-        }
+      var _blob = (audioSource instanceof Blob) ? audioSource : null;
+      if (typeof audioSource === 'string' && audioSource.indexOf('base64') > -1) {
+        var _arr = audioSource.split(','), _mime = (_arr[0].match(/:(.*?);/)||[])[1], _bstr = atob(_arr[1]);
+        var _u8 = new Uint8Array(_bstr.length);
+        for (var _i = 0; _i < _bstr.length; _i++) _u8[_i] = _bstr.charCodeAt(_i);
+        _blob = new Blob([_u8], { type: _mime });
       }
 
-      if (finalParsedScript.length > 0) {
-        finalParsedScript.forEach(function(item, i){
-          if (typeof item.start !== 'number' || isNaN(item.start)) {
-            item.start = _segInput[i] ? _segInput[i].start : i * 3.0;
-          }
-          item.start = Math.round(item.start * 10) / 10;
+      if (_blob) {
+        var response = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&language=ko&diarize=true&smart_format=true&filler_words=false', {
+          method: 'POST',
+          headers: { 'Authorization': 'Token ' + deepgramKey, 'Content-Type': _blob.type || 'audio/webm' },
+          body: _blob
         });
-        await DB.updateMemory(memoryId, { content: JSON.stringify(finalParsedScript) });
+
+        if (response.ok) {
+          var data = await response.json();
+          var words = data.results?.channels?.[0]?.alternatives?.[0]?.words || [];
+
+          if (words.length > 0) {
+            var rawSegments = [];
+            var curSeg = null;
+            const SILENCE_GAP = 0.8;
+
+            // 1차 세그먼트 생성
+            words.forEach(w => {
+              var wTxt = w.punctuated_word || w.word;
+              if (!curSeg || curSeg.speakerIndex !== w.speaker || (w.start - curSeg.end) >= SILENCE_GAP) {
+                if (curSeg) rawSegments.push(curSeg);
+                curSeg = { speakerIndex: w.speaker, text: wTxt, start: w.start, end: w.end };
+              } else {
+                curSeg.text += (wTxt.match(/^[가-힣A-Za-z0-9]/) ? ' ' : '') + wTxt;
+                curSeg.end = w.end;
+              }
+            });
+            if (curSeg) rawSegments.push(curSeg);
+
+            // [핵심] Speaker Drift(화자 증식) 억제 클러스터링
+            // 장시간 통화 시 생성되는 2, 3, 4번 화자를, 가장 발화량이 많은 Top 2 화자에게 강제 흡수시킴
+            var spkStats = {};
+            rawSegments.forEach(s => {
+              var spk = s.speakerIndex;
+              if (!spkStats[spk]) spkStats[spk] = 0;
+              spkStats[spk] += s.text.length;
+            });
+
+            // 글자수 기준 내림차순 정렬하여 메인 2명 확정
+            var sortedSpks = Object.keys(spkStats).sort((a,b) => spkStats[b] - spkStats[a]);
+            var spk1 = parseInt(sortedSpks[0]);
+            var spk2 = sortedSpks[1] !== undefined ? parseInt(sortedSpks[1]) : spk1;
+
+            // 잡음 화자를 앞뒤 문맥에 맞춰 메인 화자에게 통폐합
+            var lastValidSpk = spk1;
+            rawSegments.forEach(s => {
+              if (s.speakerIndex !== spk1 && s.speakerIndex !== spk2) {
+                s.speakerIndex = (lastValidSpk === spk1) ? spk2 : spk1;
+              }
+              lastValidSpk = s.speakerIndex;
+            });
+
+            // "나" 찾기 점수제 (메인 2명 중 누가 나인지 판별)
+            var scores = {}; scores[spk1] = 0; scores[spk2] = 0;
+            rawSegments.forEach(s => {
+              var t = s.text;
+              // 내가 쓰는 단어 (+)
+              if (/(넥스팩|nexpack|캐리어|JH|플레이트|CCS|제가|저희가)/gi.test(t)) scores[s.speakerIndex] += 2;
+              // 상대방이 나를 부르는 단어 (-)
+              if (/(김부장|부장님|김팀장|팀장님)/g.test(t)) scores[s.speakerIndex] -= 3;
+            });
+
+            var myIndex = spk1;
+            if (scores[spk2] > scores[spk1]) {
+              myIndex = spk2;
+            } else if (scores[spk1] === scores[spk2]) {
+              // 동점이면 보통 첫 말을 건네거나 받는 순서 참조 (0번 화자를 기본으로)
+              myIndex = rawSegments[0].speakerIndex; 
+            }
+
+            // 최종 매핑 (제미니 과부하 방지를 위해 여기서 즉시 DB 저장 후 파이프라인 강제 종료)
+            var finalScript = rawSegments.map((s, idx) => {
+              var isMe = (s.speakerIndex === myIndex);
+              
+              // (극단적 예외) 파일이 완전 모노라서 분리가 안된 경우만 홀짝 교대
+              if (spk1 === spk2) isMe = (idx % 2 === 0);
+
+              return {
+                speaker: isMe ? '나' : targetName, // "상대방" 대신 targetName 적용
+                text: window._koreanSTTFix(s.text),
+                start: Math.round(s.start * 10) / 10
+              };
+            });
+
+            await DB.updateMemory(memoryId, { content: JSON.stringify(finalScript), aiModelUsed: 'Deepgram(Cluster)' });
+            
+            var dur = words.length > 0 ? words[words.length - 1].end : 0;
+            await TokenTracker.addAudioUsage(dur);
+            
+            // 1시간 분량의 세그먼트를 제미니에 넘기면 무조건 터지므로 여기서 함수 즉각 리턴(성공 종료)
+            return; 
+          }
+        }
       }
     } catch(err) {
-      console.warn('[Script] 제미니 정규 분석 오류, 로컬 이분화 대본 보존 완료');
+      console.warn('[Deepgram 1선 처리 실패, 비상 백업 STT 가동]', err);
     }
-  };
-  </script>
+  }
+
+  // ==========================================
+  // [STAGE 2] Deepgram 통신 실패 시 비상용 2선 백업 STT
+  // ==========================================
+  if (segsToUse.length === 0 && audioSource && groqKey) {
+    try {
+      var _b = (audioSource instanceof Blob) ? audioSource : null;
+      if (!_b && typeof audioSource === 'string' && audioSource.indexOf('base64') > -1) {
+        var _a  = audioSource.split(',');
+        var _m = (_a[0].match(/:(.*?);/)||[])[1] || 'audio/webm';
+        var _bs = atob(_a[1]);
+        var _u  = new Uint8Array(_bs.length);
+        for (var _j = 0; _j < _bs.length; _j++) _u[_j] = _bs.charCodeAt(_j);
+        _b = new Blob([_u], { type: _m });
+      }
+      if (_b) {
+        var _res = await AbacusAI.transcribeAudio(_b);
+        if (_res) {
+          if (_res.text && !textToUse) textToUse = _res.text;
+          if (_res.segments && _res.segments.length > 0) segsToUse = _res.segments;
+        }
+      }
+    } catch(e) { console.warn('[Groq 백업 실패]', e); }
+  }
+
+  if (!textToUse && segsToUse.length === 0) return;
+
+  if (textToUse) textToUse = window._koreanSTTFix(textToUse);
+  segsToUse = segsToUse.map(function(seg) {
+    return Object.assign({}, seg, { text: window._koreanSTTFix(seg.text || '') });
+  });
+
+  if (segsToUse.length === 0 && textToUse) {
+    var _sents = textToUse.split(/\.\s+|\n/).filter(function(s){ return s.trim().length > 2; });
+    segsToUse = _sents.length > 1
+      ? _sents.map(function(s, i){ return { start: i * 4.0, text: s.trim() }; })
+      : [{ start: 0.0, text: textToUse.trim() }];
+  }
+
+  // 백업 로직에서도 "상대방" 대신 targetName 적용
+  var baseScript = segsToUse.map(function(s, i) {
+    var textVal = (s.text || '').trim();
+    var isMe = /(넥스팩|제가|저희가|확인해볼게요)/.test(textVal);
+    
+    return {
+      speaker: isMe ? '나' : targetName,
+      text:    textVal,
+      start:   typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0
+    };
+  }).filter(function(s) { return s.text.length > 0; });
+
+  try { 
+    await DB.updateMemory(memoryId, { content: JSON.stringify(baseScript) }); 
+  } catch(e) { }
+
+};
+</script>
 
   <!-- ==================== SCREEN: ALL MEMORIES ==================== -->
   <script>
@@ -3825,244 +3624,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
           playTTS();
         }
       });
-    }
-
- async function startManualDiarization(id) {
-      const m = await DB.getMemory(id);
-      if (!m) return;
-
-      const overlay = document.createElement('div');
-      overlay.className = 'modal-overlay';
-      overlay.style.zIndex = '99999';
-      overlay.innerHTML = `
-        <div style="
-          max-width:460px;width:95%;
-          background:#060d1a;
-          border:1px solid #1e3a5f;
-          border-radius:20px;
-          overflow:hidden;
-          box-shadow:0 30px 80px rgba(0,0,0,0.8),0 0 0 1px rgba(99,102,241,0.2);
-          font-family:'Courier New',monospace;
-        ">
-          <div style="
-            background:linear-gradient(135deg,#0c1829,#150d30);
-            padding:13px 18px;
-            border-bottom:1px solid #1e3a5f;
-            display:flex;justify-content:space-between;align-items:center;
-          ">
-            <div style="display:flex;align-items:center;gap:10px;">
-              <div style="display:flex;gap:5px;align-items:center;">
-                <div style="width:10px;height:10px;border-radius:50%;background:#ef4444;box-shadow:0 0 6px #ef444466;"></div>
-                <div style="width:10px;height:10px;border-radius:50%;background:#f59e0b;box-shadow:0 0 6px #f59e0b66;"></div>
-                <div style="width:10px;height:10px;border-radius:50%;background:#10b981;box-shadow:0 0 6px #10b98166;"></div>
-              </div>
-              <span style="font-size:10px;color:#818cf8;font-weight:700;letter-spacing:2px;">MULTI-AGENT PIPELINE</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;">
-              <div id="hd-pulse" style="width:7px;height:7px;border-radius:50%;background:#10b981;box-shadow:0 0 6px #10b981;animation:mv-pulse 1.2s infinite;"></div>
-              <span id="mv-timer" style="font-size:11px;color:#334155;font-variant-numeric:tabular-nums;">00:00</span>
-            </div>
-          </div>
-
-          <div style="padding:14px 12px 8px;display:flex;gap:5px;align-items:stretch;">
-            <div id="mv-s1" style="flex:1;background:#080f1e;border:1px solid #1e3a5f;border-radius:12px;padding:11px 8px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:5px;transition:all 0.4s;">
-              <div style="font-size:20px;">🧬</div>
-              <p style="font-size:9px;font-weight:700;color:#334155;letter-spacing:1.2px;margin:0;">ACOUSTIC</p>
-              <p id="mv-s1-txt" style="font-size:9px;color:#1e3a5f;margin:0;line-height:1.3;">대기 중</p>
-              <div id="mv-s1-badge" style="font-size:9px;color:#1e3a5f;background:#030810;border:1px solid #1e3a5f;border-radius:4px;padding:1px 6px;margin-top:2px;">--</div>
-            </div>
-            <div style="display:flex;align-items:center;flex-shrink:0;padding-bottom:8px;">
-              <svg width="18" height="14" viewBox="0 0 18 14">
-                <line id="mv-a1l" x1="0" y1="7" x2="12" y2="7" stroke="#1e3a5f" stroke-width="1.5"/>
-                <polygon id="mv-a1h" points="11,3 18,7 11,11" fill="#1e3a5f"/>
-              </svg>
-            </div>
-            <div id="mv-s2" style="flex:1;background:#080f1e;border:1px solid #1e3a5f;border-radius:12px;padding:11px 8px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:5px;transition:all 0.4s;">
-              <div style="font-size:20px;">🔬</div>
-              <p style="font-size:9px;font-weight:700;color:#334155;letter-spacing:1.2px;margin:0;">DEEPGRAM</p>
-              <p id="mv-s2-txt" style="font-size:9px;color:#1e3a5f;margin:0;line-height:1.3;">대기 중</p>
-              <div id="mv-s2-badge" style="font-size:9px;color:#1e3a5f;background:#030810;border:1px solid #1e3a5f;border-radius:4px;padding:1px 6px;margin-top:2px;">--</div>
-            </div>
-            <div style="display:flex;align-items:center;flex-shrink:0;padding-bottom:8px;">
-              <svg width="18" height="14" viewBox="0 0 18 14">
-                <line id="mv-a2l" x1="0" y1="7" x2="12" y2="7" stroke="#1e3a5f" stroke-width="1.5"/>
-                <polygon id="mv-a2h" points="11,3 18,7 11,11" fill="#1e3a5f"/>
-              </svg>
-            </div>
-            <div id="mv-s3" style="flex:1;background:#080f1e;border:1px solid #1e3a5f;border-radius:12px;padding:11px 8px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:5px;transition:all 0.4s;">
-              <div style="font-size:20px;">🧠</div>
-              <p style="font-size:9px;font-weight:700;color:#334155;letter-spacing:1.2px;margin:0;">GEMINI</p>
-              <p id="mv-s3-txt" style="font-size:9px;color:#1e3a5f;margin:0;line-height:1.3;">대기 중</p>
-              <div id="mv-s3-badge" style="font-size:9px;color:#1e3a5f;background:#030810;border:1px solid #1e3a5f;border-radius:4px;padding:1px 6px;margin-top:2px;">--</div>
-            </div>
-          </div>
-
-          <div style="padding:0 12px 10px;">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;">
-              <div style="flex:1;height:1px;background:#0f1e38;"></div>
-              <span style="font-size:9px;color:#1e3a5f;letter-spacing:1.5px;">LIVE LOG</span>
-              <div style="flex:1;height:1px;background:#0f1e38;"></div>
-            </div>
-            <div id="mv-log" style="background:#020810;border:1px solid #0d1e35;border-radius:10px;padding:9px 11px;height:130px;overflow-y:auto;display:flex;flex-direction:column;gap:2px;">
-              <p style="font-size:9.5px;color:#0d1e35;margin:0;letter-spacing:1px;">─── PIPELINE LOG ─────────────────────────</p>
-            </div>
-          </div>
-
-          <div style="padding:0 12px 15px;">
-            <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
-              <span id="mv-prog-lbl" style="font-size:10px;color:#334155;">초기화 중...</span>
-              <span id="mv-prog-pct" style="font-size:10px;color:#6366f1;font-weight:700;">0%</span>
-            </div>
-            <div style="background:#080f1e;border-radius:999px;height:5px;overflow:hidden;border:1px solid #0f1e38;">
-              <div id="mv-prog-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#6366f1,#8b5cf6,#06b6d4);border-radius:999px;transition:width 0.5s ease;box-shadow:0 0 10px rgba(99,102,241,0.7);"></div>
-            </div>
-          </div>
-        </div>
-        <style>
-          @keyframes mv-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(0.85)}}
-          @keyframes mv-glow{0%,100%{box-shadow:0 0 0 0 rgba(99,102,241,0.3)}50%{box-shadow:0 0 0 8px rgba(99,102,241,0.05)}}
-        </style>
-      `;
-      document.body.appendChild(overlay);
-
-      const logEl   = document.getElementById('mv-log');
-      const progBar = document.getElementById('mv-prog-bar');
-      const progPct = document.getElementById('mv-prog-pct');
-      const progLbl = document.getElementById('mv-prog-lbl');
-
-      let _startTs = Date.now();
-      const _timerIv = setInterval(() => {
-        const sec = Math.floor((Date.now() - _startTs) / 1000);
-        const el = document.getElementById('mv-timer');
-        if (el) el.textContent =
-          String(Math.floor(sec/60)).padStart(2,'0') + ':' + String(sec%60).padStart(2,'0');
-      }, 1000);
-
-      const LOG_COLOR = { success:'#10b981', error:'#f87171', warn:'#fbbf24', deepgram:'#22d3ee', gemini:'#a78bfa', acoustic:'#fb923c', info:'#475569' };
-
-      function pLog(text, type='info') {
-        if (!logEl) return;
-        const p = document.createElement('p');
-        p.style.cssText = 'margin:0;font-size:10px;line-height:1.55;white-space:pre-wrap;';
-        const now = new Date();
-        const ts = [now.getHours(),now.getMinutes(),now.getSeconds()].map(n=>String(n).padStart(2,'0')).join(':');
-        p.innerHTML = `<span style="color:#1e3a5f;">[${ts}]</span> <span style="color:${LOG_COLOR[type]||LOG_COLOR.info};">${text}</span>`;
-        logEl.appendChild(p);
-        logEl.scrollTop = logEl.scrollHeight;
-      }
-
-      function setProgress(pct, label) {
-        if (progBar) progBar.style.width = Math.min(100,pct) + '%';
-        if (progPct) progPct.textContent = Math.min(100,pct) + '%';
-        if (progLbl) progLbl.textContent = label;
-      }
-
-      function stageActive(n) {
-        const el  = document.getElementById('mv-s'+n);
-        const txt = document.getElementById('mv-s'+n+'-txt');
-        if (!el) return;
-        el.style.border = '1px solid #6366f1';
-        el.style.background = 'rgba(99,102,241,0.07)';
-        el.style.animation = 'mv-glow 1.5s infinite';
-        if (txt) { txt.style.color='#a5b4fc'; txt.textContent='처리 중...'; }
-      }
-
-      function stageDone(n, label, badge, arrowColor='#6366f1') {
-        const el  = document.getElementById('mv-s'+n);
-        const txt = document.getElementById('mv-s'+n+'-txt');
-        const bdg = document.getElementById('mv-s'+n+'-badge');
-        const al  = document.getElementById('mv-a'+n+'l');
-        const ah  = document.getElementById('mv-a'+n+'h');
-        if (!el) return;
-        el.style.border = '1px solid #10b981';
-        el.style.background = 'rgba(16,185,129,0.06)';
-        el.style.animation = 'none';
-        el.style.boxShadow = '0 0 12px rgba(16,185,129,0.15)';
-        if (txt) { txt.style.color='#10b981'; txt.textContent=label||'완료'; }
-        if (bdg) { bdg.style.color='#10b981'; bdg.style.borderColor='#065f46'; bdg.textContent=badge||'✓'; }
-        if (al) al.setAttribute('stroke', arrowColor);
-        if (ah) ah.setAttribute('fill', arrowColor);
-      }
-
-      function stageFail(n, label) {
-        const el  = document.getElementById('mv-s'+n);
-        const txt = document.getElementById('mv-s'+n+'-txt');
-        if (!el) return;
-        el.style.border = '1px solid #ef4444';
-        el.style.background = 'rgba(239,68,68,0.06)';
-        el.style.animation = 'none';
-        if (txt) { txt.style.color='#f87171'; txt.textContent=label||'실패'; }
-      }
-
-      const delay = ms => new Promise(r => setTimeout(r, ms));
-
-      try {
-        stageActive(1);
-        setProgress(8, '음성 프로필 로딩 중...');
-        pLog('[ACOUSTIC] IndexedDB 사용자 성문 프로필 접근...', 'acoustic');
-        await delay(500);
-
-        const _acs = await DB.getSetting('guideVoiceAcoustics') || '120Hz - 바리톤 (남성)';
-        const _hzM = _acs.match(/([0-9]+)\s*Hz/);
-        const _hzV = _hzM ? _hzM[1]+'Hz' : '120Hz';
-
-        await delay(350);
-        pLog('[ACOUSTIC] 성문 주파수 고정 락: ' + _hzV + ' ✓', 'success');
-        pLog('[ACOUSTIC] 호칭 규칙 로드: "김부장/김팀장" → 상대방 ✓', 'acoustic');
-        stageDone(1, '프로필 완료', _hzV);
-        setProgress(22, 'Deepgram 음성 분석 전송 중...');
-
-        await delay(300);
-        stageActive(2);
-        pLog('[DEEPGRAM] Nova-2 엔진 연결 중...', 'deepgram');
-        pLog('[DEEPGRAM] 파라미터: diarize=true / utt_split=0.8s ✓', 'deepgram');
-        pLog('[DEEPGRAM] 음성 파형 바이너리 전송 중...', 'deepgram');
-
-        const _cvtPromise = window.convertToScript(m.id, m.audioData, m.title, [], m.content);
-
-        await delay(1100);
-        setProgress(48, 'Deepgram 화자 경계면 분리 중...');
-        pLog('[DEEPGRAM] 0.8초 침묵 간격 물리 분할 실행 중...', 'deepgram');
-        await delay(900);
-        pLog('[DEEPGRAM] 화자 경계면(Speaker Boundary) 분리 완료 ✓', 'success');
-        pLog('[DEEPGRAM] 세그먼트 → Gemini 교정 레이어 전달 준비...', 'deepgram');
-        stageDone(2, '분리 완료', '→ Gemini', '#06b6d4');
-        setProgress(62, 'Gemini 화자 이름표 교정 중...');
-
-        await delay(350);
-        stageActive(3);
-        pLog('[GEMINI] 화자 이름표 매핑 분석 시작...', 'gemini');
-        pLog('[GEMINI] "김부장/김팀장" 호칭 필터 가동 중...', 'gemini');
-        pLog('[GEMINI] ' + _hzV + ' 주파수 성향 대조 중...', 'gemini');
-        await delay(700);
-        setProgress(78, 'Gemini 세그먼트 힐링(분리) 중...');
-        pLog('[GEMINI] 혼재 세그먼트 Split 교정 처리 중...', 'gemini');
-        pLog('[GEMINI] 병합/요약 금지 프롬프트 락 적용 중...', 'gemini');
-
-        await _cvtPromise;
-
-        await delay(400);
-        setProgress(100, '파이프라인 전 과정 완료 ✓');
-        pLog('[GEMINI] 화자 최종 이름표 배치 완료 ✓', 'success');
-        pLog('[SYSTEM] ─── PIPELINE COMPLETE ───────────────── ✓', 'success');
-        stageDone(3, '교정 완료', '✓ Done', '#8b5cf6');
-
-        const hdPulse = document.getElementById('hd-pulse');
-        if (hdPulse) { hdPulse.style.background='#6366f1'; hdPulse.style.boxShadow='0 0 8px #6366f1'; hdPulse.style.animation='none'; }
-
-        await delay(1200);
-        UI.toast('🎯 Deepgram+Gemini 하이브리드 분석 완료!', 'success');
-
-      } catch(err) {
-        pLog('[ERROR] 분석 중 예외 발생: ' + err.message, 'error');
-        stageFail(3, '오류 발생');
-        await delay(1500);
-      } finally {
-        clearInterval(_timerIv);
-        overlay.remove();
-        show({ id });
-      }
-    }
+    } 
 
 async function startManualDiarization(id) {
       const m = await DB.getMemory(id);
@@ -4227,12 +3789,46 @@ async function startManualDiarization(id) {
         pLog('[DEEPGRAM] 파라미터: diarize=true / utt_split=0.8s ✓', 'deepgram');
 
       // [멈춤 해결] convertToScript를 백그라운드로 실행, UI는 독립적으로 진행
-        var _cvtDone = false;
+       var _cvtDone = false;
         var _cvtError = null;
-        window.convertToScript(m.id, m.audioData, m.title, [], m.content)
-          .then(function() { _cvtDone = true; })
-          .catch(function(e) { _cvtDone = true; _cvtError = e; });
+        // [수정] window.convertToScript 존재 여부 사전 확인
+        if (typeof window.convertToScript !== 'function') {
+          throw new Error('convertToScript 함수가 로드되지 않았습니다. 페이지를 새로고침 후 다시 시도하세요.');
+        }
 
+        // ▼▼▼ 이 3줄을 아래 블록으로 교체 ▼▼▼
+       var _audioSizeMB = Math.round((m.audioData ? m.audioData.length : 0) * 0.75 / 1024 / 1024);
+        var _deepgramKey = AppState.get('deepgramApiKey');
+
+        if (_audioSizeMB === 0) {
+          // 오디오 없음 → 텍스트 전용
+          pLog('[INFO] 오디오 데이터 없음 — 텍스트 기반 분석', 'warn');
+          window.convertToScript(m.id, null, m.title, [], m.content)
+            .then(function() { _cvtDone = true; })
+            .catch(function(e) { _cvtDone = true; _cvtError = e; });
+
+        } else if (_deepgramKey) {
+          // Deepgram 키 있으면 크기 제한 없이 전송 (최대 250MB 지원)
+          pLog('[DEEPGRAM] 오디오 ' + _audioSizeMB + 'MB — Deepgram 전송 시작...', 'deepgram');
+          window.convertToScript(m.id, m.audioData, m.title, [], m.content)
+            .then(function() { _cvtDone = true; })
+            .catch(function(e) { _cvtDone = true; _cvtError = e; });
+
+        } else if (_audioSizeMB <= 25) {
+          // Deepgram 없고 25MB 이하 → Groq 전송
+          pLog('[GROQ] 오디오 ' + _audioSizeMB + 'MB — Groq STT 전송...', 'deepgram');
+          window.convertToScript(m.id, m.audioData, m.title, [], m.content)
+            .then(function() { _cvtDone = true; })
+            .catch(function(e) { _cvtDone = true; _cvtError = e; });
+
+        } else {
+          // Deepgram 없고 25MB 초과 → 텍스트 전용
+          pLog('[WARN] Deepgram 키 없음 + 오디오 ' + _audioSizeMB + 'MB 초과', 'warn');
+          pLog('[INFO] 설정에서 Deepgram API 키를 등록하면 1시간 파일도 처리 가능합니다', 'info');
+          window.convertToScript(m.id, null, m.title, [], m.content)
+            .then(function() { _cvtDone = true; })
+            .catch(function(e) { _cvtDone = true; _cvtError = e; });
+        }
         // Deepgram 단계 — 실제 처리 시간 반영 (최대 45초 대기)
         await delay(800);
         setProgress(35, 'Deepgram 음성 파형 전송 중...');
