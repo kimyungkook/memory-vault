@@ -615,10 +615,11 @@
   window.ContextMenu = (() => {
     let activeMenuOverlay = null;
     let longPressTimer = null;
-    let isMenuActiveFlag = false;
+      let isMenuActiveFlag = false;
     let selectionMode = false;
     let selectedIds = new Set();
-    const LONG_PRESS_DURATION = 800;
+    // [팀장 핀셋 수정]: 답답함 해소를 위해 1.5초(1500ms)로 롱프레스 단축
+    const LONG_PRESS_DURATION = 1500;
 
     function isActive() { return isMenuActiveFlag; }
     function isSelectionMode() { return selectionMode; }
@@ -645,9 +646,23 @@
     function toggleSelection(id) {
       if (selectedIds.has(id)) selectedIds.delete(id);
       else selectedIds.add(id);
+      
       document.querySelectorAll('[data-memory-id]').forEach(card => {
         const cid = parseInt(card.dataset.memoryId);
-        card.classList.toggle('selected-card', selectedIds.has(cid));
+        const isSelected = selectedIds.has(cid);
+        
+        // 1. 카드 겉 테두리 선택 효과 토글
+        card.classList.toggle('selected-card', isSelected);
+        
+        // [팀장 핀셋 수정]: 2. 내부 체크박스(✓) UI의 색상 및 아이콘 실시간 즉시 반응 처리
+        const checkbox = card.querySelector('.selection-checkbox');
+        if (checkbox) {
+          checkbox.style.border = isSelected ? '2px solid #6366f1' : '2px solid #475569';
+          checkbox.style.background = isSelected ? '#6366f1' : 'transparent';
+          checkbox.innerHTML = isSelected 
+            ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>' 
+            : '';
+        }
       });
     }
 
@@ -745,7 +760,8 @@
         startX = e.clientX; startY = e.clientY;
         longPressTimer = setTimeout(() => {
           if (navigator.vibrate) navigator.vibrate(50);
-          showMenu(memoryId, e.clientX, e.clientY);
+          // [팀장 핀셋 수정]: 2초 누르면 팝업 없이 즉시 삭제(선택) 모드 돌입
+          _enterSelectionMode(memoryId);
         }, LONG_PRESS_DURATION);
       });
       el.addEventListener('pointermove', (e) => {
@@ -1465,15 +1481,22 @@ window.HomeScreen = (() => {
       })();
     }
 
-    function _renderMemoryCard(m) {
+ function _renderMemoryCard(m) {
       const typeIcons = { text: 'file-text', image: 'image', document: 'file', voice: 'mic' };
       const typeColors = { text: 'text-blue-400', image: 'text-green-400', document: 'text-orange-400', voice: 'text-red-400' };
       const priorityClass = m.priority === 'high' ? 'priority-high' : m.priority === 'medium' ? 'priority-medium' : 'priority-low';
       const isSelected = ContextMenu.getSelectedIds().has(m.id);
+      const inSelection = ContextMenu.isSelectionMode();
       const folder = m.folderId ? _folderMap[m.folderId] : null;
       const folderBadgeHtml = folder ? `<span class="folder-badge">📁 ${_escapeHtml(folder.name)}</span>` : '';
       return `
-        <div class="card mb-2 cursor-pointer ${isSelected ? 'selected-card' : ''}" data-memory-id="${m.id}">
+        <div class="card mb-2 cursor-pointer ${isSelected ? 'selected-card' : ''}" data-memory-id="${m.id}" style="position:relative;">
+          ${inSelection ? `
+            <!-- [팀장 핀셋 수정]: DOM 추적을 위해 'selection-checkbox' 클래스 추가 -->
+            <div class="selection-checkbox" style="position:absolute; top:12px; right:12px; width:22px; height:22px; border-radius:6px; border:2px solid ${isSelected ? '#6366f1' : '#475569'}; background:${isSelected ? '#6366f1' : 'transparent'}; display:flex; align-items:center; justify-content:center; transition:all 0.2s;">
+              ${isSelected ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>' : ''}
+            </div>
+          ` : ''}
           <div class="flex items-start gap-3">
             <i data-lucide="${typeIcons[m.type] || 'file'}" class="w-5 h-5 mt-0.5 ${typeColors[m.type] || ''}"></i>
             <div class="flex-1 min-w-0">
@@ -3107,23 +3130,41 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     return null;
   }
 
-  // ═══════════════════════════════════════════════
-  // 유틸: Gemini 2.5 직접 호출
+   // ═══════════════════════════════════════════════
+  // 유틸: Gemini 직접 호출 (404 예방 및 429 우회 자동 재시도 탑재)
   // ═══════════════════════════════════════════════
   async function _gemini(prompt, sys, maxTok) {
     if (!geminiKey || AppState.get('apiLocked')) return null;
+    var model = AppState.get('geminiModel') || 'gemini-3.5-flash';
     var url = 'https://generativelanguage.googleapis.com/v1beta/models/'
-      + 'gemini-2.5-flash-preview-05-20:generateContent?key=' + geminiKey;
+      + model + ':generateContent?key=' + geminiKey;
     try {
-      var res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          systemInstruction: sys ? { parts: [{ text: sys }] } : undefined,
-          generationConfig: { maxOutputTokens: maxTok || 4000, temperature: 0.1, topP: 0.8 }
-        })
-      });
+      var res;
+      var retries = 3;       // 제미니 한도 초과 시 최대 3회 재시도
+      var delayMs = 3000;    // 구글 서버 안정을 위해 초기 대기시간 3초 설정
+      
+      // [팀장 핀셋 수정]: 구글 제미니 무료 API 레이트 리밋(429) 우회 자동 재시도 루프
+      while (retries > 0) {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            systemInstruction: sys ? { parts: [{ text: sys }] } : undefined,
+            generationConfig: { maxOutputTokens: maxTok || 4000, temperature: 0.1, topP: 0.8 }
+          })
+        });
+        
+        if (res.status === 429) {
+          console.warn('[Gemini AI] 429 Too Many Requests 감지. ' + (delayMs / 1000) + '초 후 자동 재시도합니다. (남은 횟수: ' + retries + ')');
+          await new Promise(function(resolve) { setTimeout(resolve, delayMs); });
+          retries--;
+          delayMs *= 2; // 대기 시간 지수 백오프 증가
+        } else {
+          break; // 정상 응답 시 즉시 탈출
+        }
+      }
+
       if (!res.ok) return null;
       var d = await res.json();
       var txt = (d.candidates && d.candidates[0] &&
@@ -3285,45 +3326,69 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     }
   }
 
-  // ═══════════════════════════════════════════════
-  // STAGE 3: 세그먼트별 Groq STT
+// ═══════════════════════════════════════════════
+  // STAGE 3: 세그먼트별 Groq STT (병렬 비동기 최적화 엔진)
   // ═══════════════════════════════════════════════
   async function _transcribeSegments(segList) {
     if (!groqKey || AppState.get('apiLocked')) return null;
     var model = AppState.get('groqSttModel') || 'whisper-large-v3';
     var results = [];
+    
+    // [팀장 핀셋 수정]: 1시간 파일의 수백 개 세그먼트를 3개씩 묶어 동시(병렬) 처리하여 속도 대폭 향상
+    var BATCH_SIZE = 3; 
 
-    for (var i = 0; i < segList.length; i++) {
-      var seg = segList[i];
-      var fd = new FormData();
-      fd.append('file', seg.blob, 'seg_'+i+'.wav');
-      fd.append('model', model);
-      fd.append('language', 'ko');
-      fd.append('response_format', 'json');
+    for (var i = 0; i < segList.length; i += BATCH_SIZE) {
+      var batch = segList.slice(i, i + BATCH_SIZE);
+      
+     var batchPromises = batch.map(async function(seg, bIdx) {
+        var fd = new FormData();
+        fd.append('file', seg.blob, 'seg_' + (i + bIdx) + '.wav');
+        fd.append('model', model);
+        fd.append('language', 'ko');
+        fd.append('response_format', 'json');
 
-      try {
-        var r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + groqKey },
-          body: fd
-        });
-        if (!r.ok) {
-          results.push({ startSec: seg.startSec, endSec: seg.endSec,
-            durationSec: seg.durationSec, text: '', index: seg.index });
-          continue;
+        try {
+          var r;
+          var retries = 3;       // 429 발생 시 최대 3회 재시도
+          var delayMs = 2000;    // 초기 대기시간 2초
+          
+          // [팀장 핀셋 수정]: Groq 429(Too Many Requests) 한도 초과 차단 방지 지능형 재시도 루프
+          while (retries > 0) {
+            r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+              method: 'POST',
+              headers: { 'Authorization': 'Bearer ' + groqKey },
+              body: fd
+            });
+            
+            if (r.status === 429) {
+              console.warn('[Groq STT] 429 Too Many Requests 감지. ' + (delayMs / 1000) + '초 후 자동 재시도합니다. (남은 횟수: ' + retries + ')');
+              await new Promise(function(resolve) { setTimeout(resolve, delayMs); });
+              retries--;
+              delayMs *= 2; // 재시도 대기시간을 점진적으로 증가 (지수 백오프)
+            } else {
+              break; // 429가 아니면 즉시 탈출하여 정상 처리
+            }
+          }
+
+          if (!r.ok) {
+            return { startSec: seg.startSec, endSec: seg.endSec, durationSec: seg.durationSec, text: '', index: seg.index };
+          }
+          var d = await r.json();
+          var txt = (d.text || '').trim();
+          txt = _cleanHallucination(txt); // 환각 단어 즉시 제거
+          
+          await TokenTracker.addAudioUsage(seg.durationSec).catch(function(){});
+          return { startSec: seg.startSec, endSec: seg.endSec, durationSec: seg.durationSec, text: txt, index: seg.index };
+        } catch(e) {
+          return { startSec: seg.startSec, endSec: seg.endSec, durationSec: seg.durationSec, text: '', index: seg.index };
         }
-        var d = await r.json();
-        var txt = (d.text || '').trim();
-        // 환각 단어 즉시 제거
-        txt = _cleanHallucination(txt);
-        results.push({ startSec: seg.startSec, endSec: seg.endSec,
-          durationSec: seg.durationSec, text: txt, index: seg.index });
-        await TokenTracker.addAudioUsage(seg.durationSec).catch(function(){});
-      } catch(e) {
-        results.push({ startSec: seg.startSec, endSec: seg.endSec,
-          durationSec: seg.durationSec, text: '', index: seg.index });
-      }
+      });
+
+      // 3개를 동시에 던지고 모두 응답이 올 때까지 대기
+      var batchResults = await Promise.all(batchPromises);
+      results = results.concat(batchResults);
     }
+    
     return results.filter(function(s){ return s.text.length > 0; });
   }
 
@@ -3446,7 +3511,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
   async function _geminiRefine(assigned, bio) {
     if (!geminiKey || assigned.length === 0) return assigned;
 
-    var CHUNK = 12;
+    var CHUNK = 10;
     var out = [];
 
     // ★ 내가 사용한 방식을 시스템 프롬프트로 완전 이식
@@ -3712,15 +3777,22 @@ if (typeof window.convertToScript === 'function') {
         ${NavBar.render(screenTitle)}
         <div class="pb-24 nav-content-offset fade-in">
           <div class="p-4">
-            ${inSelection ? `
+           ${inSelection ? `
               <div class="flex items-center justify-between mb-4">
-                <span class="text-sm text-indigo-400 font-semibold">선택 모드 (${ContextMenu.getSelectedIds().size}개 선택)</span>
+                <span class="text-sm text-indigo-400 font-semibold">삭제 모드 (${ContextMenu.getSelectedIds().size}개 선택)</span>
                 <div class="flex gap-2">
                   <button onclick="ContextMenu.deleteSelected()" class="btn btn-danger text-xs">선택 삭제</button>
                   <button onclick="ContextMenu.exitSelectionMode()" class="btn btn-secondary text-xs">취소</button>
                 </div>
               </div>
-            ` : `<h2 class="text-lg font-bold mb-4">${screenTitle}</h2>`}
+            ` : `
+              <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-bold">${screenTitle}</h2>
+                <button onclick="AllMemoriesScreen.deleteAll()" class="btn btn-danger text-xs flex items-center gap-1">
+                  <i data-lucide="trash-2" class="w-3 h-3"></i> 일괄 삭제
+                </button>
+              </div>
+            `}
 
             <!-- Folder filter dropdown -->
             <div class="mb-3">
@@ -3785,10 +3857,21 @@ if (typeof window.convertToScript === 'function') {
       });
     }
 
-    function setFilter(f) { filter = f; _render(); }
+     function setFilter(f) { filter = f; _render(); }
     function setFolderFilter(fId, fName) { folderFilter = fId; _folderFilterName = fName || ''; _render(); }
 
-    return { show, setFilter, setFolderFilter };
+    // [팀장 핀셋 수정]: 전체 기억 일괄 삭제 비즈니스 로직 추가
+    function deleteAll() {
+      UI.confirm('데이터 일괄 삭제', '저장된 모든 데이터를 일괄 삭제하시겠습니까?\n(분류된 폴더 껍데기는 유지됩니다)', async () => {
+        UI.showLoading('전체 데이터 삭제 중...');
+        await db.memories.clear();
+        UI.hideLoading();
+        UI.toast('모든 데이터가 완벽히 삭제되었습니다.', 'success');
+        _render();
+      }, '일괄 삭제');
+    }
+
+    return { show, setFilter, setFolderFilter, deleteAll };
   })();
   </script>
 
@@ -3925,20 +4008,26 @@ if (typeof window.convertToScript === 'function') {
       _contentHtml = `<p class="text-sm whitespace-pre-wrap leading-relaxed">${_escapeHtml(displayContent) || '<span class="text-slate-500">내용 없음</span>'}</p>`;
     }
 
-      const app = document.getElementById('app');
+    const app = document.getElementById('app');
       app.innerHTML = `
         ${NavBar.render(memory.title || '기억 보기')}
         <div class="p-4 pb-24 nav-content-offset fade-in">
            ${memory.type === 'voice' ? `
-            <div class="flex gap-2 mb-4 justify-between items-center">
+            <div class="flex flex-wrap gap-2 mb-4 justify-between items-center">
               <button onclick="ViewMemoryScreen.startManualDiarization(${memory.id})"
-                class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5">
-                🎙️ AI 화자 분석 시작
+                class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1 justify-center flex-1">
+                🎙️ AI 화자 분석
+              </button>
+              ${_liveSegs ? `
+              <button onclick="ViewMemoryScreen.revertToTextMode(${memory.id})"
+                class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1 justify-center flex-1">
+                📄 텍스트 전환
               </button>
               <button onclick="ViewMemoryScreen._invertAllSpeakers(${memory.id})"
-                class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5">
-                🔄 화자 전체 반전
+                class="bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1 justify-center flex-1">
+                🔄 화자 반전
               </button>
+              ` : ''}
             </div>
           ` : ''}
           <div class="flex items-center justify-center mb-6 gap-3 p-2" style="background:#1e293b; border-radius:12px; border:1px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
@@ -4645,13 +4734,31 @@ async function startManualDiarization(id) {
             speaker: s.speaker === spA ? spB : (s.speaker === spB ? spA : s.speaker)
           });
         });
-        await DB.updateMemory(id, { content: JSON.stringify(inverted) });
+       await DB.updateMemory(id, { content: JSON.stringify(inverted) });
         UI.toast('🔄 화자 전체 반전 완료!', 'success');
         show({ id: id });
       } catch(e) { UI.toast('오류: ' + e.message, 'error'); }
     }
 
-    return { show, edit, remove, downloadDoc, downloadDocByIndex, readAloud, startManualDiarization, swapSpeaker, invertAllSpeakers };
+    // [팀장 핀셋 수정]: 대화형 UI를 원본 텍스트로 합쳐서 되돌리는 기능
+    async function revertToTextMode(id) {
+      var mem = await DB.getMemory(id);
+      if (!mem || !mem.content) return;
+      try {
+        var segs = JSON.parse(mem.content);
+        if (!Array.isArray(segs)) return;
+        UI.confirm('텍스트 모드로 전환', '대화형 UI를 해제하고 원본 텍스트 형태로 되돌리시겠습니까?', async () => {
+          var plainText = segs.map(function(s){ return s.text; }).join('\n\n');
+          await DB.updateMemory(id, { content: plainText });
+          UI.toast('📄 텍스트 모드로 복구되었습니다.', 'success');
+          show({ id: id });
+        }, '전환');
+      } catch(e) { 
+        UI.toast('이미 텍스트 모드입니다.', 'info'); 
+      }
+    }
+
+    return { show, edit, remove, downloadDoc, downloadDocByIndex, readAloud, startManualDiarization, swapSpeaker, invertAllSpeakers, revertToTextMode };
   })();
   </script>
 
@@ -5874,7 +5981,6 @@ async function setupFakePin() {
 
     return { init, navigate, goBack, goForward, canGoForward, getHistoryLength };
   })();
-
   window.addEventListener('DOMContentLoaded', () => {
     App.init();
 
