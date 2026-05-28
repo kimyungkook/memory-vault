@@ -480,21 +480,31 @@
       return () => { listeners[key] = listeners[key].filter(f => f !== fn); };
     }
 
-    async function loadSettings() {
+   async function loadSettings() {
       const pinHash = await DB.getSetting('pinHash');
       const theme = await DB.getSetting('theme');
       const encryptionEnabled = await DB.getSetting('encryptionEnabled');
-      const abacusApiKey = await DB.getSetting('abacusApiKey');
-     const geminiApiKey = await DB.getSetting('geminiApiKey');
-      const groqApiKey = await DB.getSetting('groqApiKey');
-      const groqSttModel = await DB.getSetting('groqSttModel');
-      const geminiModel = await DB.getSetting('geminiModel');
       
-      // [추가] Deepgram API 키 로드
+      // 1. DB에서 키값 및 모델 설정 로드
+      const abacusApiKey = await DB.getSetting('abacusApiKey');
+      if (abacusApiKey) state.abacusApiKey = abacusApiKey;
+
+      const geminiApiKey = await DB.getSetting('geminiApiKey');
+      if (geminiApiKey) state.geminiApiKey = geminiApiKey;
+
+      const groqApiKey = await DB.getSetting('groqApiKey');
+      if (groqApiKey) state.groqApiKey = groqApiKey;
+
+      const groqSttModel = await DB.getSetting('groqSttModel');
+      if (groqSttModel) state.groqSttModel = groqSttModel;
+
+      const geminiModel = await DB.getSetting('geminiModel');
+      if (geminiModel) state.geminiModel = geminiModel;
+      
       const deepgramApiKey = await DB.getSetting('deepgramApiKey');
       if (deepgramApiKey) state.deepgramApiKey = deepgramApiKey;
 
-      // [추가] API 락(Lock) 상태값 로드
+      // 2. API 락(Lock) 상태값 로드
       const apiLocked = await DB.getSetting('apiLocked');
       state.apiLocked = !!apiLocked;
 
@@ -1603,6 +1613,7 @@ window.HomeScreen = (() => {
               <button id="btn-save" class="btn btn-primary flex-1">${editing ? '수정' : '저장'}</button>
             </div>
           </div>
+          ${_renderTabBar('addMemory')}
         </div>
       `;
       UI.refreshIcons();
@@ -1727,13 +1738,14 @@ window.HomeScreen = (() => {
               <label class="text-sm text-slate-400 mb-1 block">태그 (쉼표로 구분)</label>
               <input type="text" id="mem-tags" placeholder="태그1, 태그2" value="${editing?.tags ? editing.tags.join(', ') : ''}"/>
             </div>
-            <div class="flex gap-3">
+           <div class="flex gap-3">
               <button id="btn-ai-desc" class="btn btn-secondary flex-1 flex items-center justify-center gap-2">
                 <i data-lucide="sparkles" class="w-4 h-4"></i> AI 분석
               </button>
               <button id="btn-save" class="btn btn-primary flex-1">${editing ? '수정' : '저장'}</button>
             </div>
           </div>
+          ${_renderTabBar('addMemory')}
         </div>
       `;
       UI.refreshIcons();
@@ -1903,8 +1915,9 @@ window.HomeScreen = (() => {
               <label class="text-sm text-slate-400 mb-1 block">태그 (쉼표로 구분)</label>
               <input type="text" id="mem-tags" placeholder="태그1, 태그2" value="${editing?.tags ? editing.tags.join(', ') : ''}"/>
             </div>
-            <button id="btn-save" class="btn btn-primary w-full">${editing ? '수정' : '저장'}</button>
+           <button id="btn-save" class="btn btn-primary w-full">${editing ? '수정' : '저장'}</button>
           </div>
+          ${_renderTabBar('addMemory')}
         </div>
       `;
       UI.refreshIcons();
@@ -2097,7 +2110,20 @@ window.HomeScreen = (() => {
 
             <div>
               <label class="text-sm text-slate-400 mb-1 block">음성 인식 텍스트</label>
-              <textarea id="mem-transcript" rows="4" placeholder="음성 인식된 텍스트가 여기에 표시됩니다...">${_escapeHtml(editing?.content || '')}</textarea>
+              <textarea 
+  id="mem-transcript" 
+  placeholder="음성 인식된 텍스트가 여기에 표시됩니다..."
+  style="
+    width:100%;
+    min-height:96px;
+    max-height:1600px;
+    overflow-y:auto;
+    resize:none;
+    line-height:1.6;
+    transition:height 0.15s ease;
+    box-sizing:border-box;
+  "
+>${_escapeHtml(editing?.content || '')}</textarea>
             </div>
             <div id="ai-actions" class="hidden" style="background:#1e293b;border-radius:12px;border:1px solid #6366f1;border-left:3px solid #6366f1;padding:14px;margin-top:-8px"></div>
             <div>
@@ -2119,14 +2145,52 @@ window.HomeScreen = (() => {
               <label class="text-sm text-slate-400 mb-1 block">태그 (쉼표로 구분)</label>
               <input type="text" id="mem-tags" placeholder="태그1, 태그2" value="${editing?.tags ? editing.tags.join(', ') : ''}"/>
             </div>
-            <button id="btn-save" class="btn btn-primary w-full">${editing ? '수정' : '저장'}</button>
+          <button id="btn-save" class="btn btn-primary w-full">${editing ? '수정' : '저장'}</button>
           </div>
+          ${_renderTabBar('addMemory')}
         </div>
       `;
       UI.refreshIcons();
       _renderAudioList();
       document.getElementById('btn-rec').addEventListener('click', _toggleRecording);
       document.getElementById('btn-save').addEventListener('click', _save);
+
+// ─── 동적 textarea 자동 높이 조절 ───
+      (function _initDynamicTextarea() {
+        const ta = document.getElementById('mem-transcript');
+        if (!ta) return;
+
+        const LINE_HEIGHT = 24;    // px (line-height:1.6 × font-size:15px ≈ 24px)
+        const MAX_LINES   = 80;
+        const MAX_HEIGHT  = LINE_HEIGHT * MAX_LINES; // 1920px
+
+        function _resize() {
+          ta.style.height = 'auto';
+          const newH = Math.min(ta.scrollHeight, MAX_HEIGHT);
+          ta.style.height = newH + 'px';
+          ta.style.overflowY = ta.scrollHeight > MAX_HEIGHT ? 'auto' : 'hidden';
+        }
+
+        // 초기 렌더 (기존 값이 채워진 경우)
+        _resize();
+
+        // 사용자 입력 & 프로그래밍 setValue 모두 감지
+        ta.addEventListener('input',  _resize);
+        ta.addEventListener('change', _resize);
+
+        // STT 결과처럼 외부에서 .value = '...' 으로 주입될 때도 자동 감지
+        // (MutationObserver 대신 폴링으로 안정 처리)
+        let _prev = ta.value;
+        const _poll = setInterval(() => {
+          if (ta.value !== _prev) {
+            _prev = ta.value;
+            _resize();
+          }
+          // 화면이 사라지면 인터벌 정리
+          if (!document.getElementById('mem-transcript')) clearInterval(_poll);
+        }, 300);
+      })();
+      // ─── 동적 textarea 끝 ───
 
       // ✅ 삼성 녹음파일 업로드 처리 + 자동 AI 텍스트 변환(STT)
       document.getElementById('audio-file-input').addEventListener('change', async (e) => {
@@ -2886,271 +2950,712 @@ window.HomeScreen = (() => {
     return { callLLM, analyzeImage, transcribeAudio };
   })();
 </script>
+
+<!-- ==================== AUDIO PREPROCESSOR (노이즈 필터) ==================== -->
+<script>
+/**
+ * AudioPreprocessor - 전화 녹취 노이즈 제거 전처리기
+ * HighPass(80Hz) + LowPass(7500Hz) + DynamicsCompressor → WAV 반환
+ * 실패시 원본 Blob 반환 (안전 폴백)
+ */
+window.AudioPreprocessor = (() => {
+
+  async function denoise(inputBlob) {
+    try {
+      const ab = await inputBlob.arrayBuffer();
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      let decoded;
+      try {
+        decoded = await audioCtx.decodeAudioData(ab);
+      } catch(e) {
+        await audioCtx.close();
+        console.warn('[Denoise] 디코딩 실패, 원본 사용');
+        return inputBlob;
+      }
+
+      const { numberOfChannels: nCh, length: nF, sampleRate: sr } = decoded;
+      const offCtx = new OfflineAudioContext(nCh, nF, sr);
+      const src = offCtx.createBufferSource();
+      src.buffer = decoded;
+
+      // ① 하이패스: 80Hz 이하 저주파 잡음 제거 (바람소리, 진동음)
+      const hp = offCtx.createBiquadFilter();
+      hp.type = 'highpass'; hp.frequency.value = 80; hp.Q.value = 0.7;
+
+      // ② 로우패스: 7500Hz 이상 고주파 잡음 제거 (전자기 노이즈)
+      const lp = offCtx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = 7500; lp.Q.value = 0.7;
+
+      // ③ 다이나믹 컴프레서: 통화음 음량 평준화 (작은 목소리도 선명하게)
+      const comp = offCtx.createDynamicsCompressor();
+      comp.threshold.value = -28; comp.knee.value = 20;
+      comp.ratio.value = 8; comp.attack.value = 0.005; comp.release.value = 0.3;
+
+      src.connect(hp); hp.connect(lp); lp.connect(comp);
+      comp.connect(offCtx.destination);
+      src.start(0);
+
+      const rendered = await offCtx.startRendering();
+      await audioCtx.close();
+      console.log('[Denoise] 노이즈 필터 완료 → WAV 변환 ✓');
+      return _toWav(rendered);
+
+    } catch(e) {
+      console.warn('[Denoise] 전처리 실패, 원본 그대로 사용:', e.message);
+      return inputBlob;
+    }
+  }
+
+  function _toWav(buf) {
+    const nCh = buf.numberOfChannels, sr = buf.sampleRate;
+    const nF = buf.length, bps = 2;
+    const size = 44 + nF * nCh * bps;
+    const ab = new ArrayBuffer(size);
+    const dv = new DataView(ab);
+    const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o+i, s.charCodeAt(i)); };
+
+    ws(0,'RIFF'); dv.setUint32(4, size-8, true); ws(8,'WAVE');
+    ws(12,'fmt '); dv.setUint32(16,16,true); dv.setUint16(20,1,true);
+    dv.setUint16(22,nCh,true); dv.setUint32(24,sr,true);
+    dv.setUint32(28,sr*nCh*bps,true); dv.setUint16(32,nCh*bps,true);
+    dv.setUint16(34,16,true); ws(36,'data'); dv.setUint32(40,nF*nCh*bps,true);
+
+    let off = 44;
+    for (let i = 0; i < nF; i++) {
+      for (let c = 0; c < nCh; c++) {
+        const v = Math.max(-1, Math.min(1, buf.getChannelData(c)[i]));
+        dv.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
+        off += 2;
+      }
+    }
+    return new Blob([ab], { type: 'audio/wav' });
+  }
+
+  return { denoise };
+})();
+</script>
+
 <!-- ==================== SCRIPT CONVERTER ==================== -->
 <script>
 /**
- * convertToScript - 병렬 버퍼 화자 분리 + 문맥 기반 초정밀 윤문(Polish) 통합 엔진
- * (화자 분리와 문맥 교정을 완벽히 분업화하여 1시간 장기 통화 및 겹친 목소리 완벽 대응)
+ * convertToScript - 5원칙 화자 분리 파이프라인
  */
-
+// 안전장치: 이전에 정의된 경우 덮어쓰지 않도록 초기화
+window.convertToScript = null;
 window._koreanSTTFix = function(text) {
   if (!text) return text;
-  var t = text.replace(/(\d+)\s+(박스|개|장|개월|번|회|명|팔레트|파렛|롤|키로|미터)/g, '$1$2');
-  var bizDict = [['납폼','납품'],['발쭈','발주'],['단까','단가'],['알겟습니다','알겠습니다']];
-  bizDict.forEach(p => t = t.replace(new RegExp(p[0], 'g'), p[1]));
+  // 1. 비즈니스 단위 정규화
+  var t = text.replace(/(\d+(?:\.\d+)?)\s*(박스|개|장|개월|번|회|명|팔레트|파렛|롤|키로|미터|스퀘어|파이)/g, function(match, p1, p2) {
+    var unitMap = {'스퀘어':'SQ', '파이':'Φ', '키로':'kg', '미터':'m', '팔레트':'PLT', '파렛':'PLT'};
+    return p1 + (unitMap[p2] || p2);
+  });
+  // 2. 비즈니스 오타 교정 (화살표 함수 → 일반 함수로 교체)
+  var bizDict = [['납폼','납품'],['발쭈','발주'],['단까','단가'],['알겟습니다','알겠습니다'],['결재','결제']];
+  bizDict.forEach(function(p) { t = t.replace(new RegExp(p[0], 'g'), p[1]); });
+  // 3. 통화 환각 단어 제거
+  var halDict = [
+    [/\b선생님\b/g, ''],
+    [/\b시청자\b/g, ''],
+    [/\b여러분\b/g, ''],
+    [/(예\s*){4,}/g, '예 '],
+    [/(네\s*){4,}/g, '네 ']
+  ];
+  halDict.forEach(function(p) { t = t.replace(p[0], p[1]); });
+  // 4. 중복 추임새 제거
+  t = t.replace(/\b(예|아|어|음|그|저)\s+\1\b/g, '$1');
   return t.replace(/\s{2,}/g, ' ').trim();
 };
 
 window.convertToScript = async function(memoryId, audioSource, title, segments, existingText) {
   if (!memoryId) return;
 
-  var groqKey   = AppState.get('groqApiKey');
+  var groqKey     = AppState.get('groqApiKey');
+  var geminiKey   = AppState.get('geminiApiKey');
   var deepgramKey = AppState.get('deepgramApiKey');
-  var geminiKey = AppState.get('geminiApiKey');
-  var textToUse = existingText || '';
-  var segsToUse = (Array.isArray(segments) && segments.length > 0) ? segments : [];
 
-  // =================================================================
-  // [초고도화 1] 대상 이름 완벽 추출 (부장님의 훌륭한 정규식 계승)
-  // =================================================================
-  let counterpartName = '상대방';
+  // ═══════════════════════════════════════════════
+  // 유틸: 파일명에서 상대방 이름 추출
+  // ═══════════════════════════════════════════════
+  var counterpartName = '상대방';
   if (title) {
-    let compMatch = title.match(/[\(\（]주[\)\）]\s*([^\s_\-\.]+)/i) ||
-                    title.match(/주식회사\s*([^\s_\-\.]+)/i) ||
-                    title.match(/㈜\s*([^\s_\-\.]+)/i);
-    if (compMatch) {
-      counterpartName = '(주)' + compMatch[1].trim();
-    } else {
-      let nameMatch = title.match(/(?:녹음|통화)[_ ]+([가-힣]{2,5}(?:부장님?|과장님?|대리님?|팀장님?|사장님?|차장님?|이사님?|사원)?)/);
-      if (nameMatch) {
-        counterpartName = nameMatch[1].trim();
-      } else {
-        let parts = title.split(/[_\s\-\.]+/);
-        for (let p of parts) {
-          if (p.match(/^[가-힣A-Za-z]{2,}$/) && !p.match(/^(통화|녹음|메모|음성|파일|오전|오후)$/)) {
-            counterpartName = p.trim();
-            break;
+    var ct = title
+      .replace(/^(통화|녹음|음성|메모|파일)[_\-\s]*/gi, '')
+      .replace(/(통화|녹음|음성|메모|파일)/gi, ' ')
+      .replace(/[0-9_\-\.()（）]/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    var parts = ct.split(/\s+/).filter(function(p){ return p.length >= 2; });
+    if (parts.length > 0) {
+      counterpartName = parts[0];
+      if (parts[1] && /(차장|부장|과장|대리|팀장|사장|이사|님)/.test(parts[1]))
+        counterpartName += ' ' + parts[1];
+    }
+  }
+
+  // ═══════════════════════════════════════════════
+  // 유틸: Blob 변환
+  // ═══════════════════════════════════════════════
+  function _toBlob(src) {
+    if (src instanceof Blob) return src;
+    if (typeof src === 'string' && src.indexOf('base64') > -1) {
+      var arr = src.split(',');
+      var mime = (arr[0].match(/:(.*?);/) || [])[1] || 'audio/m4a';
+      var bstr = atob(arr[1]);
+      var u8 = new Uint8Array(bstr.length);
+      for (var i = 0; i < bstr.length; i++) u8[i] = bstr.charCodeAt(i);
+      return new Blob([u8], { type: mime });
+    }
+    return null;
+  }
+
+  // ═══════════════════════════════════════════════
+  // 유틸: Gemini 2.5 직접 호출
+  // ═══════════════════════════════════════════════
+  async function _gemini(prompt, sys, maxTok) {
+    if (!geminiKey || AppState.get('apiLocked')) return null;
+    var url = 'https://generativelanguage.googleapis.com/v1beta/models/'
+      + 'gemini-2.5-flash-preview-05-20:generateContent?key=' + geminiKey;
+    try {
+      var res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          systemInstruction: sys ? { parts: [{ text: sys }] } : undefined,
+          generationConfig: { maxOutputTokens: maxTok || 4000, temperature: 0.1, topP: 0.8 }
+        })
+      });
+      if (!res.ok) return null;
+      var d = await res.json();
+      var txt = (d.candidates && d.candidates[0] &&
+        d.candidates[0].content && d.candidates[0].content.parts &&
+        d.candidates[0].content.parts[0].text) || '';
+      if (txt) {
+        var tok = (d.usageMetadata && d.usageMetadata.totalTokenCount)
+          || Math.ceil(prompt.length * 1.5);
+        TokenTracker.addTokenUsage(tok).catch(function(){});
+      }
+      return txt || null;
+    } catch(e) { return null; }
+  }
+
+  // ═══════════════════════════════════════════════
+  // PCM → WAV 변환
+  // ═══════════════════════════════════════════════
+  function _pcmToWav(pcm, sr) {
+    var bps = 2, nCh = 1;
+    var size = 44 + pcm.length * bps;
+    var ab = new ArrayBuffer(size);
+    var dv = new DataView(ab);
+    var ws = function(o,s){ for(var i=0;i<s.length;i++) dv.setUint8(o+i,s.charCodeAt(i)); };
+    ws(0,'RIFF'); dv.setUint32(4,size-8,true); ws(8,'WAVE');
+    ws(12,'fmt '); dv.setUint32(16,16,true); dv.setUint16(20,1,true);
+    dv.setUint16(22,nCh,true); dv.setUint32(24,sr,true);
+    dv.setUint32(28,sr*nCh*bps,true); dv.setUint16(32,nCh*bps,true);
+    dv.setUint16(34,16,true); ws(36,'data'); dv.setUint32(40,pcm.length*bps,true);
+    var off = 44;
+    for(var i=0;i<pcm.length;i++){
+      var v = Math.max(-1,Math.min(1,pcm[i]));
+      dv.setInt16(off, v<0?v*0x8000:v*0x7FFF, true); off+=2;
+    }
+    return new Blob([ab], { type:'audio/wav' });
+  }
+
+  // ═══════════════════════════════════════════════
+  // STAGE 1: 노이즈 필터링
+  // ═══════════════════════════════════════════════
+  async function _denoise(blob) {
+    try {
+      var ab = await blob.arrayBuffer();
+      var ac = new (window.AudioContext || window.webkitAudioContext)();
+      var decoded;
+      try { decoded = await ac.decodeAudioData(ab); }
+      catch(e) { await ac.close(); return blob; }
+
+      var sr = decoded.sampleRate, nCh = decoded.numberOfChannels, nF = decoded.length;
+      var off = new OfflineAudioContext(nCh, nF, sr);
+      var src = off.createBufferSource(); src.buffer = decoded;
+
+      var hp = off.createBiquadFilter();
+      hp.type='highpass'; hp.frequency.value=80; hp.Q.value=0.7;
+
+      var lp = off.createBiquadFilter();
+      lp.type='lowpass'; lp.frequency.value=7500; lp.Q.value=0.7;
+
+      var comp = off.createDynamicsCompressor();
+      comp.threshold.value=-28; comp.knee.value=20;
+      comp.ratio.value=8; comp.attack.value=0.005; comp.release.value=0.3;
+
+      src.connect(hp); hp.connect(lp); lp.connect(comp); comp.connect(off.destination);
+      src.start(0);
+      var rendered = await off.startRendering();
+      await ac.close();
+
+      return _pcmToWav(rendered.getChannelData(0), rendered.sampleRate);
+    } catch(e) { return blob; }
+  }
+
+  // ═══════════════════════════════════════════════
+  // STAGE 2: 침묵 경계 기반 세그먼트 분할
+  // (모노 통화 녹음 화자분리의 핵심 기반)
+  // ═══════════════════════════════════════════════
+  async function _splitBySilence(blob) {
+    try {
+      var ab = await blob.arrayBuffer();
+      var ac = new (window.AudioContext || window.webkitAudioContext)();
+      var decoded;
+      try { decoded = await ac.decodeAudioData(ab); }
+      catch(e) { await ac.close(); return null; }
+
+      var ch = decoded.getChannelData(0);
+      var sr = decoded.sampleRate;
+      await ac.close();
+
+      var FRAME      = Math.floor(sr * 0.02);   // 20ms
+      var THRESH     = 0.012;                    // RMS 임계값
+      var MIN_SIL    = Math.floor(sr * 0.18);   // 최소 침묵 길이
+      var MIN_SPE    = Math.floor(sr * 0.12);   // 최소 발화 길이
+      var PAD        = Math.floor(sr * 0.05);   // 앞뒤 패딩
+
+      // 에너지 계산
+      var energies = [];
+      for (var i = 0; i < ch.length - FRAME; i += FRAME) {
+        var sum = 0;
+        for (var j = i; j < i + FRAME; j++) sum += ch[j] * ch[j];
+        energies.push(Math.sqrt(sum / FRAME));
+      }
+
+      // 5프레임 스무딩
+      var sm = energies.map(function(v, idx) {
+        var w = energies.slice(Math.max(0,idx-2), Math.min(energies.length,idx+3));
+        return w.reduce(function(a,b){return a+b;},0)/w.length;
+      });
+
+      // 발화 구간 추출
+      var raw = [];
+      var inS = false, sS = 0, silC = 0;
+      for (var fi = 0; fi < sm.length; fi++) {
+        var isSp = sm[fi] > THRESH;
+        if (isSp && !inS) { inS=true; sS=fi*FRAME; silC=0; }
+        else if (!isSp && inS) {
+          silC += FRAME;
+          if (silC >= MIN_SIL) {
+            var eS = fi*FRAME - silC + Math.floor(MIN_SIL*0.3);
+            if ((eS-sS) >= MIN_SPE) raw.push([sS, eS]);
+            inS=false; silC=0;
+          }
+        } else if (isSp && inS) { silC=0; }
+      }
+      if (inS && (ch.length-sS) >= MIN_SPE) raw.push([sS, ch.length]);
+
+      // 인접 병합 (0.4초 미만 간격)
+      var merged = [];
+      for (var ri = 0; ri < raw.length; ri++) {
+        if (merged.length > 0) {
+          var prev = merged[merged.length-1];
+          var gap = (raw[ri][0] - prev[1]) / sr;
+          var totalDur = (raw[ri][1] - prev[0]) / sr;
+          if (gap < 0.4 && totalDur < 7.0) {
+            merged[merged.length-1][1] = raw[ri][1];
+            continue;
+          }
+        }
+        merged.push([raw[ri][0], raw[ri][1]]);
+      }
+
+      // WAV Blob 생성
+      var result = [];
+      for (var mi = 0; mi < merged.length; mi++) {
+        var smp = merged[mi][0];
+        var emp = Math.min(merged[mi][1], ch.length);
+        var padS = Math.max(0, smp - PAD);
+        var padE = Math.min(ch.length, emp + PAD);
+        var segData = ch.slice(padS, padE);
+        result.push({
+          blob: _pcmToWav(segData, sr),
+          startSec: Math.round((smp/sr)*100)/100,
+          endSec:   Math.round((emp/sr)*100)/100,
+          durationSec: Math.round(((emp-smp)/sr)*100)/100,
+          index: mi
+        });
+      }
+      return result.length > 0 ? result : null;
+    } catch(e) {
+      console.warn('[Stage2] 분할 오류:', e.message);
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════
+  // STAGE 3: 세그먼트별 Groq STT
+  // ═══════════════════════════════════════════════
+  async function _transcribeSegments(segList) {
+    if (!groqKey || AppState.get('apiLocked')) return null;
+    var model = AppState.get('groqSttModel') || 'whisper-large-v3';
+    var results = [];
+
+    for (var i = 0; i < segList.length; i++) {
+      var seg = segList[i];
+      var fd = new FormData();
+      fd.append('file', seg.blob, 'seg_'+i+'.wav');
+      fd.append('model', model);
+      fd.append('language', 'ko');
+      fd.append('response_format', 'json');
+
+      try {
+        var r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + groqKey },
+          body: fd
+        });
+        if (!r.ok) {
+          results.push({ startSec: seg.startSec, endSec: seg.endSec,
+            durationSec: seg.durationSec, text: '', index: seg.index });
+          continue;
+        }
+        var d = await r.json();
+        var txt = (d.text || '').trim();
+        // 환각 단어 즉시 제거
+        txt = _cleanHallucination(txt);
+        results.push({ startSec: seg.startSec, endSec: seg.endSec,
+          durationSec: seg.durationSec, text: txt, index: seg.index });
+        await TokenTracker.addAudioUsage(seg.durationSec).catch(function(){});
+      } catch(e) {
+        results.push({ startSec: seg.startSec, endSec: seg.endSec,
+          durationSec: seg.durationSec, text: '', index: seg.index });
+      }
+    }
+    return results.filter(function(s){ return s.text.length > 0; });
+  }
+
+  // ═══════════════════════════════════════════════
+  // 환각 단어 제거 필터
+  // ═══════════════════════════════════════════════
+  function _cleanHallucination(txt) {
+    if (!txt) return '';
+    var rules = [
+      [/\b선생님\b/g, ''],
+      [/\b시청자\b/g, ''],
+      [/\b여러분\b/g, ''],
+      [/\b감사합니다\s+감사합니다/g, '감사합니다'],
+      [/(예\s*){4,}/g, '예 '],
+      [/(네\s*){4,}/g, '네 '],
+      [/MBC|KBS|SBS/g, ''],
+    ];
+    var t = txt;
+    rules.forEach(function(r){ t = t.replace(r[0], r[1]); });
+    return t.replace(/\s{2,}/g,' ').trim();
+  }
+
+  // ═══════════════════════════════════════════════
+  // STAGE 4: ★ 핵심 — 내가 사용한 방식 코드화
+  //
+  // [내 분류 5원칙]
+  // 1. 전화통화 황금률: 첫 발화 = 무조건 수신자(상대방)
+  // 2. 인사 패턴: "여보세요/안녕하세요/예예" 구간 = 수신자→발신자 순서
+  // 3. 길이 원칙: 긴발화(2초↑)=질문자(나), 짧은단답(0.8초↓)=수신자
+  // 4. 키워드 엔진: 업무용어/질문형=나, 수긍형=상대방
+  // 5. 교대 원칙: 같은 화자 2번 연속이면 의심하고 재검토
+  // ═══════════════════════════════════════════════
+  function _assignByMyRules(transcribed, bio) {
+    var myKW  = ['제가','저희','우리','넥스팩','JH','발주','단가',
+                 '캐리어','박스','납품','확인','보내','가거든'];
+    var theirKW = ['네','예','맞습니다','알겠습니다','될텐데','될거에요',
+                   counterpartName.split(' ')[0]];
+
+    // bio에서 동적 키워드 추가
+    if (bio) {
+      var bw = bio.match(/[가-힣A-Za-z]{2,6}/g) || [];
+      bw.forEach(function(w){ if (!myKW.includes(w)) myKW.push(w); });
+    }
+
+    var result = [];
+
+    transcribed.forEach(function(seg, idx) {
+      var txt  = seg.text || '';
+      var dur  = seg.durationSec;
+      var spk  = null;
+
+      // ── 원칙 1: 전화통화 황금률 ──
+      // 첫 번째 발화는 무조건 수신자(상대방)
+      // 전화는 항상 받는 사람이 먼저 "여보세요"
+      if (idx === 0) {
+        spk = counterpartName;
+        result.push({ speaker: spk, text: txt, start: seg.startSec, _rule: 'R1-첫발화=수신자' });
+        return;
+      }
+
+      // ── 원칙 2: 인사 구간 (0~3초) 특별 처리 ──
+      // 짧고 수긍형이면 수신자, 질문형이면 발신자
+      if (seg.startSec < 3.0) {
+        if (/^(네|예|여보|안녕)/.test(txt) && dur < 1.5) {
+          spk = counterpartName;
+          result.push({ speaker: spk, text: txt, start: seg.startSec, _rule: 'R2-인사수신자' });
+          return;
+        }
+      }
+
+      // ── 원칙 3 + 4: 점수 기반 화자 판정 ──
+      var score = 0;
+
+      // 발화 길이 점수
+      if (dur >= 3.0)       score += 4;  // 긴발화 = 나(질문자)
+      else if (dur >= 1.5)  score += 2;  // 중간 = 나 가능성
+      else if (dur <= 0.8)  score -= 3;  // 짧은 단답 = 상대방
+
+      // 내 키워드
+      myKW.forEach(function(kw){
+        if (txt.includes(kw)) score += 3;
+      });
+      // 상대방 키워드
+      theirKW.forEach(function(kw){
+        if (txt.includes(kw)) score -= 2;
+      });
+
+      // 문장 끝 패턴
+      if (/[요?죠]$/.test(txt))              score += 2; // 질문형 = 나
+      if (/^(네|예|아 예|아네)/.test(txt))   score -= 3; // 수긍 시작 = 상대방
+      if (/알겠습니다|알겠어요/.test(txt))   score -= 4; // "알겠습니다" = 상대방
+      if (/맞습니다|맞아요/.test(txt))       score -= 3; // 확인 답변 = 상대방
+
+      spk = score >= 0 ? '나' : counterpartName;
+
+      // ── 원칙 5: 교대 원칙 검증 ──
+      // 직전 발화와 같은 화자가 연속 2번 이상이면 재검토
+      if (result.length >= 2) {
+        var prev1 = result[result.length-1];
+        var prev2 = result[result.length-2];
+        if (prev1.speaker === spk && prev2.speaker === spk) {
+          // 3연속 같은 화자 → 반전 (교대 원칙 적용)
+          // 단, 점수 차이가 크면 그대로 유지
+          if (Math.abs(score) < 3) {
+            spk = (spk === '나') ? counterpartName : '나';
           }
         }
       }
-    }
-  }
-  // 1차 추출 실패 시 방어 로직
-  if (!counterpartName || ['녹음','통화','상대방','메모'].includes(counterpartName)) {
-    counterpartName = '통화대상';
+
+      result.push({ speaker: spk, text: txt, start: seg.startSec, _rule: 'R3-점수'+score });
+    });
+
+    return result;
   }
 
-  let finalScript = []; // STAGE 3 (제미니 윤문)로 넘겨줄 최종 대본 그릇
+  // ═══════════════════════════════════════════════
+  // STAGE 5: Gemini 최종 문맥 교정
+  // (내 5원칙을 Gemini에게도 동일하게 학습시킴)
+  // ═══════════════════════════════════════════════
+  async function _geminiRefine(assigned, bio) {
+    if (!geminiKey || assigned.length === 0) return assigned;
 
-  // =================================================================
-  // [STAGE 1] Deepgram 병렬 버퍼 아키텍처 (화자 완벽 분리 및 클러스터링)
-  // =================================================================
-  if (deepgramKey && audioSource && !AppState.get('apiLocked')) {
-    try {
-      var _blob = (audioSource instanceof Blob) ? audioSource : null;
-      if (typeof audioSource === 'string' && audioSource.indexOf('base64') > -1) {
-        var _arr = audioSource.split(','), _mime = (_arr[0].match(/:(.*?);/)||[])[1], _bstr = atob(_arr[1]);
-        var _u8 = new Uint8Array(_bstr.length);
-        for (var _i = 0; _i < _bstr.length; _i++) _u8[_i] = _bstr.charCodeAt(_i);
-        _blob = new Blob([_u8], { type: _mime });
+    var CHUNK = 12;
+    var out = [];
+
+    // ★ 내가 사용한 방식을 시스템 프롬프트로 완전 이식
+    var sys = [
+      '당신은 한국 비즈니스 전화 통화 녹취록 화자 분류 전문가입니다.',
+      '',
+      '【전화통화 5원칙 — 절대 엄수】',
+      '',
+      '원칙1 [황금률] 전화를 받은 사람=' + counterpartName + '이 항상 먼저 말합니다.',
+      '  - 첫 번째 발화는 반드시 ' + counterpartName + ' 입니다.',
+      '  - "여보세요", "네" 같은 짧은 인사 = ' + counterpartName,
+      '',
+      '원칙2 [인사패턴] 전화 시작 구조:',
+      '  ① ' + counterpartName + ': "여보세요" (짧음)',
+      '  ② 나: "아 예예, 나 뭐 좀..." (발신자 인사+용건)',
+      '  ③ 이후 교대 대화',
+      '',
+      '원칙3 [길이원칙]',
+      '  - 3초 이상 긴 발화 = 주로 "나" (용건 설명, 질문)',
+      '  - 1초 이하 짧은 답변 = 주로 ' + counterpartName + ' (수긍, 단답)',
+      '',
+      '원칙4 [키워드엔진]',
+      '  "나" 키워드: 제가/저희/우리/넥스팩/JH/박스/납품/발주/확인해/가거든요/되나요?',
+      '  "' + counterpartName + '" 키워드: 네/예/맞습니다/알겠습니다/될텐데/것같아요',
+      '',
+      '원칙5 [교대원칙]',
+      '  - 질문 다음은 반드시 답변 (화자 교체)',
+      '  - 같은 화자가 3연속이면 중간 하나를 반전 검토',
+      '  - "?" 로 끝나는 발화 다음은 반드시 상대방 답변',
+      '',
+      '【단어 교정 규칙】',
+      '비즈니스 용어 고정: 넥스팩/JH/4P/2.5V/V라고/박스/납품/조목기',
+      '오인식 교정: "이점오"→"2.5" / "선생님"→"" / "발쭈"→"발주"',
+      '"여보세요" 오인식 → 삭제하고 화자만 표시',
+      '',
+      '【출력 형식 — 절대 엄수】',
+      'JSON 배열만 출력. 백틱/설명/마크다운 절대 금지.',
+      '형식: [{"speaker":"나","text":"발화내용","start":0.0}, ...]',
+      '입력과 동일한 발화 수 유지. start 값 변경 금지.'
+    ].join('\n');
+
+    for (var ci = 0; ci < assigned.length; ci += CHUNK) {
+      var chunk = assigned.slice(ci, ci+CHUNK).map(function(s){
+        return { speaker: s.speaker, text: s.text, start: s.start };
+      });
+
+      var isFirst = ci === 0;
+      var prompt = [
+        '[내 프로필] ' + (bio || '넥스팩 영업부장 김용국'),
+        '[상대방] ' + counterpartName,
+        isFirst ? '[⚠️ 주의: 이 청크의 첫 발화는 반드시 ' + counterpartName + ' 입니다]' : '',
+        '',
+        '[교정할 대화 JSON]',
+        JSON.stringify(chunk, null, 2),
+        '',
+        '5원칙에 따라 화자 교정 + 단어 교정하여 JSON 배열만 출력하세요.'
+      ].filter(Boolean).join('\n');
+
+      var res = await _gemini(prompt, sys, 5000);
+      if (res) {
+        var clean = res.replace(/```json/gi,'').replace(/```/g,'').trim();
+        var jS = clean.indexOf('['), jE = clean.lastIndexOf(']');
+        if (jS !== -1 && jE !== -1) clean = clean.substring(jS, jE+1);
+        try {
+          var parsed = JSON.parse(clean);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            out = out.concat(parsed);
+            continue;
+          }
+        } catch(pe) { console.warn('[Stage5] JSON파싱실패:', pe.message); }
       }
+      out = out.concat(chunk); // Gemini 실패시 규칙 결과 그대로
+    }
+    return out;
+  }
 
-      if (_blob) {
-        // 서버 과부하 및 쓸데없는 소음 필터링을 위한 파라미터 적용
-        var response = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&language=ko&diarize=true&smart_format=true&filler_words=false', {
-          method: 'POST',
-          headers: { 'Authorization': 'Token ' + deepgramKey, 'Content-Type': _blob.type || 'audio/webm' },
-          body: _blob
+  // ═══════════════════════════════════════════════
+  // STAGE 6: 연속 발화 병합 + 최종 저장
+  // ═══════════════════════════════════════════════
+  function _mergeFinal(segs) {
+    var merged = [];
+    for (var mi2 = 0; mi2 < segs.length; mi2++) {
+      var seg = segs[mi2];
+      if (!seg || !seg.text || seg.text.trim().length === 0) continue;
+      var txt = seg.text.trim();
+      if (merged.length > 0) {
+        var last = merged[merged.length - 1];
+        var gap = seg.start - last.start;
+        if (last.speaker === seg.speaker
+            && (last.text + txt).length < 120
+            && gap < 2.0) {
+          last.text += ' ' + txt;
+          continue;
+        }
+      }
+      merged.push({ speaker: seg.speaker, text: txt, start: seg.start });
+    }
+    return merged;
+  }
+
+  // ═══════════════════════════════════════════════
+  // 메인 파이프라인 실행
+  // ═══════════════════════════════════════════════
+  try {
+    console.log('[ConvertToScript] ▶ 시작:', title);
+    var bio = await DB.getSetting('userVoiceBio') || '넥스팩 영업부장 김용국';
+    var rawBlob = _toBlob(audioSource);
+    if (!rawBlob) {
+      console.warn('[ConvertToScript] 오디오 없음');
+      return;
+    }
+
+    // Step 1: 노이즈 제거
+    console.log('[Step1] 노이즈 필터링...');
+    var cleanBlob = await _denoise(rawBlob);
+
+    // Step 2: 침묵 기반 분할
+    console.log('[Step2] 침묵 경계 분할...');
+    var segList = await _splitBySilence(cleanBlob);
+    console.log('[Step2] 분할 결과:', segList ? segList.length : 0, '개');
+
+    var finalScript = [];
+
+    if (segList && segList.length > 0 && groqKey) {
+      // Step 3: 세그먼트별 STT
+      console.log('[Step3] 세그먼트 STT...');
+      var transcribed = await _transcribeSegments(segList);
+      console.log('[Step3] STT 완료:', transcribed ? transcribed.length : 0, '개');
+
+      if (transcribed && transcribed.length > 0) {
+        // Step 4: 내 5원칙 기반 화자 배정
+        console.log('[Step4] 5원칙 화자 배정...');
+        var assigned = _assignByMyRules(transcribed, bio);
+        assigned.forEach(function(s){
+          console.log('  ', s.start+'s', s.speaker, '|', s.text.substring(0,20), '('+s._rule+')');
         });
 
-        if (response.ok) {
-          var data = await response.json();
-          var words = data.results?.channels?.[0]?.alternatives?.[0]?.words || [];
+        // Step 5: Gemini 최종 교정
+        console.log('[Step5] Gemini 교정...');
+        var refined = await _geminiRefine(assigned, bio);
 
-          if (words.length > 0) {
-            var rawSegments = [];
-            var activeBuffers = {}; 
-            const OVERLAP_SILENCE_GAP = 1.5; // 겹친 목소리를 분리하는 침묵 간격
-
-            // [독립 버퍼 가동]
-            words.forEach(w => {
-              var spk = w.speaker;
-              var wTxt = w.punctuated_word || w.word;
-
-              if (!activeBuffers[spk]) {
-                activeBuffers[spk] = { speakerIndex: spk, text: wTxt, start: w.start, end: w.end };
-              } else {
-                if (w.start - activeBuffers[spk].end > OVERLAP_SILENCE_GAP) {
-                  rawSegments.push(activeBuffers[spk]);
-                  activeBuffers[spk] = { speakerIndex: spk, text: wTxt, start: w.start, end: w.end };
-                } else {
-                  activeBuffers[spk].text += (wTxt.match(/^[가-힣A-Za-z0-9]/) ? ' ' : '') + wTxt;
-                  activeBuffers[spk].end = w.end;
-                }
-              }
-            });
-            for (let key in activeBuffers) {
-              if (activeBuffers[key]) rawSegments.push(activeBuffers[key]);
-            }
-            rawSegments.sort((a, b) => a.start - b.start);
-
-            // [클러스터링] 1시간 파일 화자 증식 억제
-            var spkStats = {};
-            rawSegments.forEach(s => {
-              if (!spkStats[s.speakerIndex]) spkStats[s.speakerIndex] = 0;
-              spkStats[s.speakerIndex] += s.text.length;
-            });
-
-            var sortedSpks = Object.keys(spkStats).sort((a,b) => spkStats[b] - spkStats[a]);
-            var spk1 = parseInt(sortedSpks[0]);
-            var spk2 = sortedSpks[1] !== undefined ? parseInt(sortedSpks[1]) : spk1;
-
-            var lastValidSpk = spk1;
-            rawSegments.forEach(s => {
-              if (s.speakerIndex !== spk1 && s.speakerIndex !== spk2) {
-                s.speakerIndex = (lastValidSpk === spk1) ? spk2 : spk1;
-              }
-              lastValidSpk = s.speakerIndex;
-            });
-
-            // ["나" 판별 로직] - 사용자 프로필 동적 연동 (하드코딩 탈피)
-            const userBioTxt = await DB.getSetting('userVoiceBio') || '이름: 김용국\n직장: 넥스팩 영업부장';
-            let extName = (userBioTxt.match(/이름:\s*([가-힣]{2,4})/) || ['', '김용국'])[1];
-            let extTitle = (userBioTxt.match(/(부장|팀장|과장|대리|사원|이사|대표|소장|사장)/) || ['', '부장'])[1];
-            let extCompany = (userBioTxt.match(/직장:\s*([가-힣A-Za-z]+)/) || ['', '넥스팩'])[1];
-
-            // 동적 정규식: 내 회사명이나 내 언어습관
-            let myPositiveReg = new RegExp(`(${extCompany}|제가|저희가|확인해|보내드릴)`, 'gi');
-            // 동적 정규식: 내 이름이나 내 직급을 부르는 소리 (상대방이 발화함)
-            let myNegativeReg = new RegExp(`(${extName}|${extName.charAt(0)}${extTitle}|${extTitle}님)`, 'g');
-
-            var scores = {}; scores[spk1] = 0; scores[spk2] = 0;
-            rawSegments.forEach(s => {
-              var t = s.text;
-              if (myPositiveReg.test(t)) scores[s.speakerIndex] += 2;
-              if (myNegativeReg.test(t)) scores[s.speakerIndex] -= 3;
-            });
-
-            var myIndex = spk1;
-            if (scores[spk2] > scores[spk1]) {
-              myIndex = spk2;
-            } else if (scores[spk1] === scores[spk2]) {
-              myIndex = rawSegments[0].speakerIndex; 
-            }
-
-            // 배열 매핑 완료
-            finalScript = rawSegments.map((s, idx) => {
-              var isMe = (s.speakerIndex === myIndex);
-              if (spk1 === spk2) isMe = (idx % 2 === 0);
-
-              return {
-                speaker: isMe ? '나' : counterpartName,
-                text: window._koreanSTTFix(s.text),
-                start: Math.round(s.start * 10) / 10
-              };
-            });
-
-            // 화자 분리가 끝난 날것의 대본을 우선 1차 DB 저장하여 화면에 즉시 띄움 (무한 로딩 체감 감소)
-            await DB.updateMemory(memoryId, { content: JSON.stringify(finalScript), aiModelUsed: 'Deepgram(Parallel)' });
-            
-            var dur = words.length > 0 ? words[words.length - 1].end : 0;
-            await TokenTracker.addAudioUsage(dur);
-          }
-        }
+        // Step 6: 병합 + 저장
+        finalScript = _mergeFinal(refined);
       }
-    } catch(err) {
-      console.warn('[Deepgram 1선 처리 실패, 백업 전환]', err);
     }
-  }
 
-  // =====================================================================
-  // [STAGE 2] 비상용 백업 STT (Deepgram 실패 시 Groq 가동)
-  // =====================================================================
-  if (finalScript.length === 0 && audioSource && groqKey) {
-    try {
-      var _b = (audioSource instanceof Blob) ? audioSource : null;
-      if (!_b && typeof audioSource === 'string' && audioSource.indexOf('base64') > -1) {
-        var _a  = audioSource.split(',');
-        var _m = (_a[0].match(/:(.*?);/)||[])[1] || 'audio/webm';
-        var _bs = atob(_a[1]);
-        var _u  = new Uint8Array(_bs.length);
-        for (var _j = 0; _j < _bs.length; _j++) _u[_j] = _bs.charCodeAt(_j);
-        _b = new Blob([_u], { type: _m });
+    // ── 폴백: 세그먼트 실패 시 전체 텍스트 → Gemini 분리 ──
+    if (finalScript.length < 2) {
+      console.log('[Fallback] 전체 텍스트 Gemini 분리...');
+      var rawTxt = existingText || '';
+
+      if (!rawTxt && groqKey) {
+        var sttR = await AbacusAI.transcribeAudio(cleanBlob);
+        rawTxt = (sttR && sttR.text) ? sttR.text.trim() : '';
       }
-      if (_b) {
-        var _res = await AbacusAI.transcribeAudio(_b);
-        if (_res && _res.segments) {
-          finalScript = _res.segments.map((s, idx) => {
-            var txt = window._koreanSTTFix((s.text || '').trim());
-            var isMe = /(넥스팩|제가|저희가|확인해볼게요)/.test(txt);
-            return {
-              speaker: isMe ? '나' : counterpartName,
-              text: txt,
-              start: typeof s.start === 'number' ? Math.round(s.start * 10) / 10 : 0.0
-            };
-          }).filter(s => s.text.length > 0);
-          
-          await DB.updateMemory(memoryId, { content: JSON.stringify(finalScript) });
+      rawTxt = _cleanHallucination(rawTxt);
+
+      if (rawTxt && rawTxt.length > 5) {
+        var fbSys = [
+          '당신은 전화통화 화자 분리 전문가입니다.',
+          '전화통화 황금률: 첫 발화 = 반드시 ' + counterpartName + ' (수신자)',
+          '출력: JSON 배열만. [{"speaker":"나","text":"...","start":0.0}]'
+        ].join('\n');
+        var fbPrompt = [
+          '[내 프로필] ' + bio,
+          '[수신자=상대방] ' + counterpartName,
+          '[⚠️ 첫 발화 = 반드시 ' + counterpartName + ']',
+          '[전체 녹취 텍스트]', rawTxt, '',
+          '"나"와 "' + counterpartName + '"으로 분리. JSON만 출력.'
+        ].join('\n');
+        var fbRes = await _gemini(fbPrompt, fbSys, 6000);
+        if (fbRes) {
+          var fc = fbRes.replace(/```json/gi,'').replace(/```/g,'').trim();
+          var fS=fc.indexOf('['), fE=fc.lastIndexOf(']');
+          if(fS!==-1&&fE!==-1) fc=fc.substring(fS,fE+1);
+          try {
+            var fp = JSON.parse(fc);
+            if (Array.isArray(fp) && fp.length > 1)
+              finalScript = _mergeFinal(fp);
+          } catch(e) {}
         }
       }
-    } catch(e) { console.warn('[Groq 백업 실패]', e); }
-  }
-
-  // =====================================================================
-  // [STAGE 3] Gemini 초정밀 문맥 에디터 (구조 락킹 적용)
-  // 외계어("비게세하고", "번만만 한" 등)를 문맥에 맞게 사람 언어로 다듬어줍니다.
-  // =====================================================================
-  if (finalScript.length > 0 && geminiKey) {
-    try {
-      const CHUNK_SIZE = 20; // 대량의 텍스트로 인한 LLM 뻗음 방지 (20문장씩 분할 처리)
-      let polishedScript = [];
-
-      // 사용자 정보 로드 (문맥 이해를 도움)
-      const userBio = await DB.getSetting('userVoiceBio') || '넥스팩 영업부장 김용국';
-
-      for (let i = 0; i < finalScript.length; i += CHUNK_SIZE) {
-        let chunk = finalScript.slice(i, i + CHUNK_SIZE);
-        
-        let sysPrompt = [
-          '당신은 비즈니스 통화 녹취록 전문 교정 에디터입니다.',
-          '【절대 준수 규칙】',
-          '1. 제공된 JSON 배열 구조, "speaker", "start" 값은 단 1글자도 수정하지 마세요. (화자 순서 훼손 완전 금지)',
-          '2. 오직 "text" 속성 안의 내용만 문맥에 맞게 교정하세요.',
-          '3. 말 더듬기(예: "번만만 한"), 기계음 오인식(예: "비게세하고", "결혼식 처럼고")을 앞뒤 문맥에 맞는 자연스러운 비즈니스 한국어로 수정하세요.',
-          '4. 새로운 대화 내용을 창작하거나 기존 문장을 통째로 삭제하지 마세요.',
-          '5. 반드시 유효한 JSON 배열 형식만 출력하세요. (마크다운 기호나 설명 텍스트 절대 금지)'
-        ].join('\n');
-
-        let usrPrompt = [
-          `[참고 문맥 정보] 통화 주체: ${userBio}, 통화 대상: ${counterpartName}`,
-          '[교정 대상 원본 데이터]',
-          JSON.stringify(chunk, null, 2)
-        ].join('\n');
-
-        let resultStr = await AbacusAI.callLLM(usrPrompt, sysPrompt, 4000);
-        
-        if (resultStr) {
-          // LLM이 쓸데없이 붙이는 마크다운 잔재 완벽 필터링
-          let cleanJson = resultStr.replace(/```json/g, '').replace(/```/g, '').trim();
-          let parsedChunk = JSON.parse(cleanJson);
-          polishedScript = polishedScript.concat(parsedChunk);
-        } else {
-          // 에러 시 원본 chunk 그대로 유지 (안정성 확보)
-          polishedScript = polishedScript.concat(chunk);
-        }
-      }
-
-      // 제미니 교정이 모두 성공적으로 끝났다면, 다듬어진 최종본으로 DB를 2차 업데이트!
-      if (polishedScript.length > 0 && polishedScript.length === finalScript.length) {
-        await DB.updateMemory(memoryId, { content: JSON.stringify(polishedScript), aiModelUsed: 'Deepgram + Gemini Polish' });
-        // 화면을 보고 있는 중이었다면 텍스트가 예쁘게 자동으로 바뀌게 됩니다.
-      }
-    } catch (err) {
-      console.warn('[Gemini 문맥 교정 실패 - 원본 화자 분리 텍스트 유지됨]', err);
     }
-  }
 
+    // 저장
+if (finalScript.length > 0) {
+      // ES6 spread 제거 → 호환성 있는 방식으로 교체
+      var spkMap = {};
+      finalScript.forEach(function(s){ spkMap[s.speaker] = 1; });
+      var spks = Object.keys(spkMap);
+      await DB.updateMemory(memoryId, {
+        content: JSON.stringify(finalScript),
+        aiModelUsed: '5Rule+Gemini'
+      });
+      console.log('[ConvertToScript] ✅ 완료! 총', finalScript.length, '개 / 화자:', spks.join(', '));
+    } else {
+      console.warn('[ConvertToScript] 결과 없음');
+    }
+
+  } catch(err) {
+    console.error('[ConvertToScript] 파이프라인 오류:', err.message);
+  }
 };
+// 등록 확인
+if (typeof window.convertToScript === 'function') {
+  console.log('[ConvertToScript] ✅ 함수 등록 완료');
+} else {
+  console.error('[ConvertToScript] ❌ 함수 등록 실패 — 스크립트 블록 파싱 오류 확인 필요');
+}
 </script>
 
   <!-- ==================== SCREEN: ALL MEMORIES ==================== -->
@@ -3471,6 +3976,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
               </div>
             ` : ''}
           </div>
+          ${_renderTabBar('home')}
         </div>
       `;
       UI.refreshIcons();
@@ -4056,8 +4562,15 @@ async function startManualDiarization(id) {
         pLog('[DEEPGRAM] Nova-2 엔진 연결 중...', 'deepgram');
         pLog('[DEEPGRAM] 파라미터: diarize=true / utt_split=0.8s ✓', 'deepgram');
 
+        if (typeof window.convertToScript !== 'function') {
+          pLog('[ERROR] convertToScript 함수를 찾을 수 없습니다. 페이지를 새로고침하세요.', 'error');
+          throw new Error('convertToScript is not defined');
+        }
+        if (typeof window.convertToScript !== 'function') {
+          pLog('[ERROR] convertToScript 함수를 찾을 수 없습니다. 페이지를 새로고침하세요.', 'error');
+          throw new Error('convertToScript is not defined');
+        }
         var _cvtPromise = window.convertToScript(m.id, m.audioData, m.title, [], m.content);
-
         await delay(1100);
         setProgress(48, 'Deepgram 화자 경계면 분리 중...');
         pLog('[DEEPGRAM] 0.8초 침묵 간격 물리 분할 실행 중...', 'deepgram');
