@@ -3100,7 +3100,19 @@ window._koreanSTTFix = function(text) {
     return p1 + (unitMap[p2] || p2);
   });
   // 2. 비즈니스 오타 교정 (화살표 함수 → 일반 함수로 교체)
-  var bizDict = [['납폼','납품'],['발쭈','발주'],['단까','단가'],['알겟습니다','알겠습니다'],['결재','결제']];
+  var bizDict = [
+    ['납폼','납품'],['발쭈','발주'],['단까','단가'],['알겟습니다','알겠습니다'],['결재','결제'],
+    // [당신의 회사 전용 교정 사전 — 오인식 발견 시 계속 추가]
+    ['송장','썬더스'],          // "송장" 오인식 → "썬더스"
+    ['조목기','조목희'],         // "조목기" → "조목희"
+    ['보장이','부장이'],         // "보장이" → "부장이"
+    ['조목기 보장','조목희 부장'],
+    ['넥스 팩','넥스팩'],
+    ['제이에이치','JH'],
+    ['니켈 플레이트','니켈플레이트'],
+    ['까마색','까만색'],
+    ['보빙','보빈']
+  ];
   bizDict.forEach(function(p) { t = t.replace(new RegExp(p[0], 'g'), p[1]); });
   // 3. 통화 환각 단어 제거
   var halDict = [
@@ -3455,9 +3467,14 @@ async function _splitBySilence(blob) {
       [/(네\s*){4,}/g, '네 '],
       [/MBC|KBS|SBS/g, ''],
     ];
-    var t = txt;
+   var t = txt;
     rules.forEach(function(r){ t = t.replace(r[0], r[1]); });
-    return t.replace(/\s{2,}/g,' ').trim();
+    t = t.replace(/\s{2,}/g,' ').trim();
+    // [단어 교정] 비즈니스 사전 교정 추가 적용
+    if (typeof window._koreanSTTFix === 'function') {
+      t = window._koreanSTTFix(t);
+    }
+    return t;
   }
 
   // ═══════════════════════════════════════════════
@@ -3626,10 +3643,18 @@ async function _splitBySilence(blob) {
       '  - 같은 화자가 3연속이면 중간 하나를 반전 검토',
       '  - "?" 로 끝나는 발화 다음은 반드시 상대방 답변',
       '',
-      '【단어 교정 규칙】',
-      '비즈니스 용어 고정: 넥스팩/JH/4P/2.5V/V라고/박스/납품/조목기',
-      '오인식 교정: "이점오"→"2.5" / "선생님"→"" / "발쭈"→"발주"',
-      '"여보세요" 오인식 → 삭제하고 화자만 표시',
+      '【단어 교정 규칙 — 반드시 적용】',
+      '아래는 STT가 자주 틀리는 단어다. 문맥상 맞으면 교정하라:',
+      '  "송장" → "썬더스" (제품명일 때)',
+      '  "조목기" → "조목희" (사람 이름)',
+      '  "보장" → "부장" (직급일 때)',
+      '  "조목기 보장" → "조목희 부장"',
+      '  "까마색" → "까만색"',
+      '  "보빙" → "보빈"',
+      '  "이점오" → "2.5"',
+      '  "선생님"/"여러분"/"시청자" → 삭제 (통화 환각)',
+      '고유명사 고정: 넥스팩/JH/캐리어/니켈플레이트/보빈/단가/발주/납품/썬더스',
+      '문맥상 어색한 단어는 비즈니스 통화 상황에 맞게 자연스럽게 교정하라.',
       '',
       '【출력 형식 — 절대 엄수】',
       'JSON 배열만 출력. 백틱/설명/마크다운 절대 금지.',
@@ -3699,7 +3724,7 @@ async function _splitBySilence(blob) {
   async function _deepgramDiarize(blob) {
     if (!deepgramKey) { console.log('[Deepgram] 키 없음 → Groq 폴백'); return null; }
     try {
-      var url = 'https://api.deepgram.com/v1/listen'
+       var url = 'https://api.deepgram.com/v1/listen'
         + '?model=nova-2&language=ko&diarize=true'
         + '&punctuate=true&smart_format=true&utterances=true';
       var res = await fetch(url, {
