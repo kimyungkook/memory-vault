@@ -3692,6 +3692,66 @@ async function _splitBySilence(blob) {
     return merged;
   }
 
+// ═══════════════════════════════════════════════
+  // [1선] Deepgram Nova-2 — STT + 서버 측 화자 분리(diarize)
+  // 성공 시 화자분리된 스크립트 반환, 실패 시 null (Groq로 폴백)
+  // ═══════════════════════════════════════════════
+  async function _deepgramDiarize(blob) {
+    if (!deepgramKey) { console.log('[Deepgram] 키 없음 → Groq 폴백'); return null; }
+    try {
+      var url = 'https://api.deepgram.com/v1/listen'
+        + '?model=nova-2&language=ko&diarize=true'
+        + '&punctuate=true&smart_format=true&utterances=true';
+      var res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Token ' + deepgramKey,
+          'Content-Type': blob.type || 'audio/wav'
+        },
+        body: blob
+      });
+      if (!res.ok) {
+        var errTxt = '';
+        try { errTxt = await res.text(); } catch(e) {}
+        console.warn('[Deepgram] HTTP ' + res.status + ' → Groq 폴백 | ' + errTxt.substring(0, 200));
+        return null;
+      }
+      var data = await res.json();
+      var utts = (data.results && data.results.utterances) || [];
+      if (utts.length === 0) {
+        console.warn('[Deepgram] utterances 비어있음 → Groq 폴백');
+        return null;
+      }
+
+      // 토큰 사용량 기록
+      var dur = (data.metadata && data.metadata.duration) || 0;
+      if (dur > 0) await TokenTracker.addAudioUsage(dur).catch(function(){});
+
+      // Deepgram speaker(0,1,2...) → 이름 매핑
+      // 전화통화 황금률: 첫 발화 화자 = 상대방(수신자)
+      var firstSpeaker = utts[0].speaker;
+      var script = [];
+      for (var ui = 0; ui < utts.length; ui++) {
+        var u = utts[ui];
+        var spk = (u.speaker === firstSpeaker) ? counterpartName : '나';
+        var cleanTxt = _cleanHallucination((u.transcript || '').trim());
+        if (cleanTxt.length > 0) {
+          script.push({
+            speaker: spk,
+            text: cleanTxt,
+            start: Math.round((u.start || 0) * 10) / 10
+          });
+        }
+      }
+
+      console.log('[Deepgram] ✅ 화자분리 성공:', script.length, '개 발화');
+      return script.length > 0 ? script : null;
+    } catch(e) {
+      console.warn('[Deepgram] 예외 → Groq 폴백:', e.message);
+      return null;
+    }
+  }
+
   // ═══════════════════════════════════════════════
   // 메인 파이프라인 실행
   // ═══════════════════════════════════════════════
@@ -3708,14 +3768,30 @@ async function _splitBySilence(blob) {
     console.log('[Step1] 노이즈 필터링...');
     var cleanBlob = await _denoise(rawBlob);
 
-    // Step 2: 침묵 기반 분할
-    console.log('[Step2] 침묵 경계 분할...');
-    var segList = await _splitBySilence(cleanBlob);
-    console.log('[Step2] 분할 결과:', segList ? segList.length : 0, '개');
+   var finalScript = [];
 
-    var finalScript = [];
+    // ★ [1선] Deepgram 서버 화자분리 우선 시도 (성공 시 Groq 경로 자동 스킵)
+    if (deepgramKey) {
+      console.log('[1선] Deepgram 화자분리 시도...');
+      var dgScript = await _deepgramDiarize(cleanBlob);
+      if (dgScript && dgScript.length >= 2) {
+        console.log('[1선] Deepgram 성공 → Gemini 이름표 교정...');
+        var dgRefined = await _geminiRefine(dgScript, bio);
+        finalScript = _mergeFinal(dgRefined);
+        console.log('[1선] Deepgram 경로 완료:', finalScript.length, '개');
+      }
+    }
 
-    if (segList && segList.length > 0 && groqKey) {
+    // Step 2: 침묵 기반 분할 (Deepgram 실패/미사용 시에만 의미 있음)
+    var segList = null;
+    if (finalScript.length < 2) {
+      console.log('[2선] Groq+5원칙 경로 진입');
+      console.log('[Step2] 침묵 경계 분할...');
+      segList = await _splitBySilence(cleanBlob);
+      console.log('[Step2] 분할 결과:', segList ? segList.length : 0, '개');
+    }
+
+    if (finalScript.length < 2 && segList && segList.length > 0 && groqKey) {
       // Step 3: 세그먼트별 STT
       console.log('[Step3] 세그먼트 STT...');
       var transcribed = await _transcribeSegments(segList);
