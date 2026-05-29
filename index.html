@@ -2786,10 +2786,11 @@ window.HomeScreen = (() => {
     async function _callGemini(prompt, systemPrompt, apiKey, maxTokens = 500) {
       const model = AppState.get('geminiModel') || 'gemini-3.5-flash';
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+     // [핀셋 수정] thinking 모델 대응: 출력 토큰 최소 2000 보장 (thinking 토큰 여유)
       const body = {
-        contents: [{ parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
         systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
-        generationConfig: { maxOutputTokens: maxTokens }
+        generationConfig: { maxOutputTokens: Math.max(maxTokens, 2000) }
       };
       const response = await fetch(url, {
         method: 'POST',
@@ -2797,9 +2798,22 @@ window.HomeScreen = (() => {
         body: JSON.stringify(body)
       });
       const data = await response.json();
-      if (data.candidates && data.candidates[0]) {
-        return data.candidates[0].content?.parts?.[0]?.text || '';
+      // [핀셋 수정] 400/빈응답 정밀 진단 로그
+      if (!response.ok) {
+        console.error('[Gemini 400 진단] status:', response.status,
+          '| message:', data.error?.message,
+          '| status:', data.error?.status);
+        throw new Error(data.error?.message || ('Gemini HTTP ' + response.status));
       }
+      if (data.candidates && data.candidates[0]) {
+        const cand = data.candidates[0];
+        // thinking 토큰이 출력 한도를 다 먹어 답변이 빈 경우 진단
+        if (cand.finishReason === 'MAX_TOKENS') {
+          console.warn('[Gemini] MAX_TOKENS — 출력 토큰 부족. maxOutputTokens 상향 필요');
+        }
+        return cand.content?.parts?.[0]?.text || '';
+      }
+      console.error('[Gemini 빈응답 진단]', JSON.stringify(data).substring(0, 500));
       throw new Error(data.error?.message || 'Gemini API error');
     }
 
@@ -2910,11 +2924,24 @@ window.HomeScreen = (() => {
           return { text: '', segments: [] };
         }
 
-        var response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + groqKey },
-          body: formData
-        });
+        var response;
+        var sttRetries = 4;
+        var sttDelay = 5000;
+        while (sttRetries > 0) {
+          response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + groqKey },
+            body: formData
+          });
+          if (response.status === 429) {
+            console.warn('[Groq STT] 429 감지. ' + (sttDelay/1000) + '초 후 재시도 (남은: ' + sttRetries + ')');
+            await new Promise(function(r){ setTimeout(r, sttDelay); });
+            sttRetries--;
+            sttDelay *= 1.8;
+          } else {
+            break;
+          }
+        }
         if (!response.ok) {
           console.warn('[Groq STT] 오류 ' + response.status);
           return { text: '', segments: [] };
@@ -3133,7 +3160,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
    // ═══════════════════════════════════════════════
   // 유틸: Gemini 직접 호출 (404 예방 및 429 우회 자동 재시도 탑재)
   // ═══════════════════════════════════════════════
-  async function _gemini(prompt, sys, maxTok) {
+  async function _gemini(prompt, sys, maxTok, forceJson) {
     if (!geminiKey || AppState.get('apiLocked')) return null;
     var model = AppState.get('geminiModel') || 'gemini-3.5-flash';
     var url = 'https://generativelanguage.googleapis.com/v1beta/models/'
@@ -3145,16 +3172,20 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       
       // [팀장 핀셋 수정]: 구글 제미니 무료 API 레이트 리밋(429) 우회 자동 재시도 루프
       while (retries > 0) {
+        // [핀셋 수정] Gemini 3.x thinking 모델 대응:      
         res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
             systemInstruction: sys ? { parts: [{ text: sys }] } : undefined,
-            generationConfig: { maxOutputTokens: maxTok || 4000, temperature: 0.1, topP: 0.8 }
+            generationConfig: {
+              maxOutputTokens: maxTok || 8000,
+              responseMimeType: forceJson ? 'application/json' : 'text/plain'
+            }
           })
         });
-        
+
         if (res.status === 429) {
           console.warn('[Gemini AI] 429 Too Many Requests 감지. ' + (delayMs / 1000) + '초 후 자동 재시도합니다. (남은 횟수: ' + retries + ')');
           await new Promise(function(resolve) { setTimeout(resolve, delayMs); });
@@ -3165,11 +3196,24 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         }
       }
 
-      if (!res.ok) return null;
+     // [핀셋 진단] 400의 정확한 사유를 콘솔에 출력
+      if (!res.ok) {
+        var errBody = null;
+        try { errBody = await res.json(); } catch(e) {}
+        console.error('[_gemini 400 진단] status:', res.status,
+          '| message:', (errBody && errBody.error && errBody.error.message),
+          '| 전체:', JSON.stringify(errBody).substring(0, 600));
+        return null;
+      }
       var d = await res.json();
       var txt = (d.candidates && d.candidates[0] &&
         d.candidates[0].content && d.candidates[0].content.parts &&
         d.candidates[0].content.parts[0].text) || '';
+      // [핀셋 진단] 응답은 왔는데 빈 텍스트인 경우
+      if (!txt && d.candidates && d.candidates[0]) {
+        console.warn('[_gemini 빈응답] finishReason:', d.candidates[0].finishReason,
+          '| 전체:', JSON.stringify(d).substring(0, 600));
+      }
       if (txt) {
         var tok = (d.usageMetadata && d.usageMetadata.totalTokenCount)
           || Math.ceil(prompt.length * 1.5);
@@ -3239,7 +3283,7 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
   // STAGE 2: 침묵 경계 기반 세그먼트 분할
   // (모노 통화 녹음 화자분리의 핵심 기반)
   // ═══════════════════════════════════════════════
-  async function _splitBySilence(blob) {
+async function _splitBySilence(blob) {
     try {
       var ab = await blob.arrayBuffer();
       var ac = new (window.AudioContext || window.webkitAudioContext)();
@@ -3252,10 +3296,10 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       await ac.close();
 
       var FRAME      = Math.floor(sr * 0.02);   // 20ms
-      var THRESH     = 0.012;                    // RMS 임계값
-      var MIN_SIL    = Math.floor(sr * 0.18);   // 최소 침묵 길이
-      var MIN_SPE    = Math.floor(sr * 0.12);   // 최소 발화 길이
-      var PAD        = Math.floor(sr * 0.05);   // 앞뒤 패딩
+      var THRESH     = 0.018;                    // RMS 임계값 (작은 침묵도 경계 인식)
+      var MIN_SIL    = Math.floor(sr * 0.12);   // 최소 침묵 0.12초 (더 자주 끊음)
+      var MIN_SPE    = Math.floor(sr * 0.10);   // 최소 발화 0.10초
+      var PAD        = Math.floor(sr * 0.04);   // 앞뒤 패딩
 
       // 에너지 계산
       var energies = [];
@@ -3288,14 +3332,14 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       }
       if (inS && (ch.length-sS) >= MIN_SPE) raw.push([sS, ch.length]);
 
-      // 인접 병합 (0.4초 미만 간격)
+      // 인접 병합 (0.25초 미만 간격, 4초 미만)
       var merged = [];
       for (var ri = 0; ri < raw.length; ri++) {
         if (merged.length > 0) {
           var prev = merged[merged.length-1];
           var gap = (raw[ri][0] - prev[1]) / sr;
           var totalDur = (raw[ri][1] - prev[0]) / sr;
-          if (gap < 0.4 && totalDur < 7.0) {
+          if (gap < 0.25 && totalDur < 4.0) {
             merged[merged.length-1][1] = raw[ri][1];
             continue;
           }
@@ -3334,10 +3378,15 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
     var model = AppState.get('groqSttModel') || 'whisper-large-v3';
     var results = [];
     
-    // [팀장 핀셋 수정]: 1시간 파일의 수백 개 세그먼트를 3개씩 묶어 동시(병렬) 처리하여 속도 대폭 향상
-    var BATCH_SIZE = 3; 
+   // [핀셋 수정]: 429 방지 — 동시 1개씩 순차 처리 + 호출 간 간격 확보
+    var BATCH_SIZE = 1;           // 동시 발사 금지 (한도 초과 주범 제거)
+    var INTER_CALL_DELAY = 2200;  // 호출 사이 최소 2.2초 (Groq 무료 분당 한도 대응)
 
     for (var i = 0; i < segList.length; i += BATCH_SIZE) {
+      // 첫 호출 제외, 매 호출 전 간격 대기
+      if (i > 0) {
+        await new Promise(function(resolve) { setTimeout(resolve, INTER_CALL_DELAY); });
+      }
       var batch = segList.slice(i, i + BATCH_SIZE);
       
      var batchPromises = batch.map(async function(seg, bIdx) {
@@ -3508,6 +3557,41 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
   // STAGE 5: Gemini 최종 문맥 교정
   // (내 5원칙을 Gemini에게도 동일하게 학습시킴)
   // ═══════════════════════════════════════════════
+ // ═══════════════════════════════════════════════
+  // [방어] Gemini 응답에서 JSON만 안전하게 추출·정제
+  // ═══════════════════════════════════════════════
+  function _safeParseJsonArray(raw) {
+    if (!raw) return null;
+    var s = raw;
+    // 1. 마크다운 코드펜스 제거
+    s = s.replace(/```json/gi, '').replace(/```/g, '').trim();
+    // 2. [OK], 설명문 등 배열 바깥 군더더기 제거 → 첫 '[' ~ 마지막 ']'
+    var st = s.indexOf('['), en = s.lastIndexOf(']');
+    if (st === -1 || en === -1 || en <= st) return null;
+    s = s.substring(st, en + 1);
+    // 3. trailing comma 제거 (,] 또는 ,})
+    s = s.replace(/,\s*]/g, ']').replace(/,\s*}/g, '}');
+    // 4. 1차 파싱 시도
+    try {
+      var p = JSON.parse(s);
+      return Array.isArray(p) ? p : null;
+    } catch(e1) {
+      // 5. 홑따옴표 키를 쌍따옴표로 교정 후 재시도
+      try {
+        var s2 = s.replace(/'/g, '"');
+        var p2 = JSON.parse(s2);
+        return Array.isArray(p2) ? p2 : null;
+      } catch(e2) {
+        console.warn('[_safeParseJsonArray] 파싱 최종 실패:', e2.message);
+        return null;
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════
+  // STAGE 5: Gemini 최종 문맥 교정
+  // (내 5원칙을 Gemini에게도 동일하게 학습시킴)
+  // ═══════════════════════════════════════════════
   async function _geminiRefine(assigned, bio) {
     if (!geminiKey || assigned.length === 0) return assigned;
 
@@ -3570,18 +3654,14 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
         '5원칙에 따라 화자 교정 + 단어 교정하여 JSON 배열만 출력하세요.'
       ].filter(Boolean).join('\n');
 
-      var res = await _gemini(prompt, sys, 5000);
+    var res = await _gemini(prompt, sys, 8000, true);
       if (res) {
-        var clean = res.replace(/```json/gi,'').replace(/```/g,'').trim();
-        var jS = clean.indexOf('['), jE = clean.lastIndexOf(']');
-        if (jS !== -1 && jE !== -1) clean = clean.substring(jS, jE+1);
-        try {
-          var parsed = JSON.parse(clean);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            out = out.concat(parsed);
-            continue;
-          }
-        } catch(pe) { console.warn('[Stage5] JSON파싱실패:', pe.message); }
+        var parsed = _safeParseJsonArray(res);
+        if (parsed && parsed.length > 0) {
+          out = out.concat(parsed);
+          continue;
+        }
+        console.warn('[Stage5] JSON 정제 후에도 실패 → 규칙 결과 사용');
       }
       out = out.concat(chunk); // Gemini 실패시 규칙 결과 그대로
     }
@@ -3600,9 +3680,9 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
       if (merged.length > 0) {
         var last = merged[merged.length - 1];
         var gap = seg.start - last.start;
-        if (last.speaker === seg.speaker
-            && (last.text + txt).length < 120
-            && gap < 2.0) {
+       if (last.speaker === seg.speaker
+            && (last.text + txt).length < 180
+            && gap < 1.5) {
           last.text += ' ' + txt;
           continue;
         }
@@ -3682,16 +3762,10 @@ window.convertToScript = async function(memoryId, audioSource, title, segments, 
           '[전체 녹취 텍스트]', rawTxt, '',
           '"나"와 "' + counterpartName + '"으로 분리. JSON만 출력.'
         ].join('\n');
-        var fbRes = await _gemini(fbPrompt, fbSys, 6000);
+       var fbRes = await _gemini(fbPrompt, fbSys, 8000, true);
         if (fbRes) {
-          var fc = fbRes.replace(/```json/gi,'').replace(/```/g,'').trim();
-          var fS=fc.indexOf('['), fE=fc.lastIndexOf(']');
-          if(fS!==-1&&fE!==-1) fc=fc.substring(fS,fE+1);
-          try {
-            var fp = JSON.parse(fc);
-            if (Array.isArray(fp) && fp.length > 1)
-              finalScript = _mergeFinal(fp);
-          } catch(e) {}
+          var fp = _safeParseJsonArray(fbRes);
+          if (fp && fp.length > 1) finalScript = _mergeFinal(fp);
         }
       }
     }
