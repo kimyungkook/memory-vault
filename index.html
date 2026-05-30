@@ -3769,24 +3769,24 @@ async function _splitBySilence(blob) {
     }
 
     try {
-      // [1순위] 전화통화 특화 모델 + 최신 화자분리 v2
+      // [1순위] 일반 nova-2 + 최신 화자분리 v2 (한국어 정식 지원)
       var urlPrimary = 'https://api.deepgram.com/v1/listen'
-        + '?model=nova-2-phonecall&language=ko'
-        + '&diarize_model=latest'
-        + '&punctuate=true&smart_format=true&utterances=true';
-
-      // [2순위] phonecall 모델이 400(한국어 미지원 등)이면 일반 nova-2 + 최신 화자분리로 자동 폴백
-      var urlFallback = 'https://api.deepgram.com/v1/listen'
         + '?model=nova-2&language=ko'
         + '&diarize_model=latest'
         + '&punctuate=true&smart_format=true&utterances=true';
 
-      console.log('[Deepgram] 1순위 시도: nova-2-phonecall + diarize v2');
-      var r = await _tryDeepgram(urlPrimary, 'phonecall');
+      // [2순위] nova-2가 혹시 실패하면 nova-3 general로 재시도
+      var urlFallback = 'https://api.deepgram.com/v1/listen'
+        + '?model=nova-3&language=multi'
+        + '&diarize_model=latest'
+        + '&punctuate=true&smart_format=true&utterances=true';
+
+      console.log('[Deepgram] 1순위 시도: nova-2 + diarize v2 (한국어)');
+      var r = await _tryDeepgram(urlPrimary, 'nova-2');
 
       if (!r.ok && (r.status === 400 || r.status === 404)) {
-        console.warn('[Deepgram] phonecall 모델 거부 → nova-2로 자동 재시도');
-        r = await _tryDeepgram(urlFallback, 'nova-2');
+        console.warn('[Deepgram] nova-2 거부 → nova-3로 자동 재시도');
+        r = await _tryDeepgram(urlFallback, 'nova-3');
       }
       if (!r.ok) {
         console.warn('[Deepgram] 최종 실패 → Groq 폴백');
@@ -4911,7 +4911,7 @@ async function startManualDiarization(id) {
 
         await delay(300);
         stageActive(2);
-        pLog('[DEEPGRAM] nova-2-phonecall 엔진 연결 중...', 'deepgram');
+        pLog('[DEEPGRAM] nova-2 엔진 연결 중...', 'deepgram');
         pLog('[DEEPGRAM] 파라미터: diarize_model=latest (화자분리 v2) ✓', 'deepgram');
 
         if (typeof window.convertToScript !== 'function') {
