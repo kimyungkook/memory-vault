@@ -12,10 +12,34 @@
   <link id="manifest-link" rel="manifest"/>
   <!-- Tailwind CSS CDN -->
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-  <!-- Dexie.js for IndexedDB -->
-  <script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
-  <!-- Lucide Icons -->
-  <script src="https://unpkg.com/lucide@0.263.1/dist/umd/lucide.js"></script>
+  <!-- Dexie.js for IndexedDB (jsdelivr 우선) -->
+  <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
+  <!-- Lucide Icons (jsdelivr 우선) -->
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.263.1/dist/umd/lucide.min.js"></script>
+  <!-- [안전장치] CDN 로드 실패 시 다른 CDN에서 자동 재시도하는 폴백 로더 -->
+  <script>
+  (function(){
+    function loadScript(src, cb){
+      var s = document.createElement('script');
+      s.src = src; s.onload = cb; s.onerror = function(){ console.warn('[CDN] 로드 실패: ' + src); cb && cb(); };
+      document.head.appendChild(s);
+    }
+    // Dexie 로드 실패 시 unpkg → cdnjs 순서로 재시도
+    if (typeof window.Dexie === 'undefined') {
+      console.warn('[CDN] Dexie 1차 실패 → unpkg 재시도');
+      loadScript('https://unpkg.com/dexie@3.2.4/dist/dexie.js', function(){
+        if (typeof window.Dexie === 'undefined') {
+          console.warn('[CDN] Dexie 2차 실패 → cdnjs 재시도');
+          loadScript('https://cdnjs.cloudflare.com/ajax/libs/dexie/3.2.4/dexie.min.js', null);
+        }
+      });
+    }
+    // Lucide 로드 실패 시 unpkg 재시도
+    if (typeof window.lucide === 'undefined') {
+      loadScript('https://unpkg.com/lucide@0.263.1/dist/umd/lucide.js', null);
+    }
+  })();
+  </script>
   <style>
     /* All styles inline - no CSS imports */
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -3723,10 +3747,9 @@ async function _splitBySilence(blob) {
   // ═══════════════════════════════════════════════
   async function _deepgramDiarize(blob) {
     if (!deepgramKey) { console.log('[Deepgram] 키 없음 → Groq 폴백'); return null; }
-    try {
-       var url = 'https://api.deepgram.com/v1/listen'
-        + '?model=nova-2&language=ko&diarize=true'
-        + '&punctuate=true&smart_format=true&utterances=true';
+
+    // ── 내부 호출 함수: 주어진 url 후보로 1회 시도 ──
+    async function _tryDeepgram(url, label) {
       var res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -3738,10 +3761,39 @@ async function _splitBySilence(blob) {
       if (!res.ok) {
         var errTxt = '';
         try { errTxt = await res.text(); } catch(e) {}
-        console.warn('[Deepgram] HTTP ' + res.status + ' → Groq 폴백 | ' + errTxt.substring(0, 200));
-        return null;
+        console.warn('[Deepgram:' + label + '] HTTP ' + res.status + ' | ' + errTxt.substring(0, 200));
+        return { ok: false, status: res.status, data: null };
       }
       var data = await res.json();
+      return { ok: true, status: 200, data: data };
+    }
+
+    try {
+      // [1순위] 전화통화 특화 모델 + 최신 화자분리 v2
+      var urlPrimary = 'https://api.deepgram.com/v1/listen'
+        + '?model=nova-2-phonecall&language=ko'
+        + '&diarize_model=latest'
+        + '&punctuate=true&smart_format=true&utterances=true';
+
+      // [2순위] phonecall 모델이 400(한국어 미지원 등)이면 일반 nova-2 + 최신 화자분리로 자동 폴백
+      var urlFallback = 'https://api.deepgram.com/v1/listen'
+        + '?model=nova-2&language=ko'
+        + '&diarize_model=latest'
+        + '&punctuate=true&smart_format=true&utterances=true';
+
+      console.log('[Deepgram] 1순위 시도: nova-2-phonecall + diarize v2');
+      var r = await _tryDeepgram(urlPrimary, 'phonecall');
+
+      if (!r.ok && (r.status === 400 || r.status === 404)) {
+        console.warn('[Deepgram] phonecall 모델 거부 → nova-2로 자동 재시도');
+        r = await _tryDeepgram(urlFallback, 'nova-2');
+      }
+      if (!r.ok) {
+        console.warn('[Deepgram] 최종 실패 → Groq 폴백');
+        return null;
+      }
+
+      var data = r.data;
       var utts = (data.results && data.results.utterances) || [];
       if (utts.length === 0) {
         console.warn('[Deepgram] utterances 비어있음 → Groq 폴백');
@@ -3752,13 +3804,49 @@ async function _splitBySilence(blob) {
       var dur = (data.metadata && data.metadata.duration) || 0;
       if (dur > 0) await TokenTracker.addAudioUsage(dur).catch(function(){});
 
-      // Deepgram speaker(0,1,2...) → 이름 매핑
+      // ── 화자 매핑 ──
       // 전화통화 황금률: 첫 발화 화자 = 상대방(수신자)
+      // 2명 통화: 첫 화자=상대방, 다른 한 명='나'
+      // 3명 이상(컨퍼런스): 첫 화자=상대방, 발화량 최다=나, 나머지=상대방2/3...
       var firstSpeaker = utts[0].speaker;
+
+      // 화자별 총 발화 길이 집계 (다중화자 판별용)
+      var spkDur = {};
+      for (var k = 0; k < utts.length; k++) {
+        var sp = utts[k].speaker;
+        var d2 = (utts[k].end || 0) - (utts[k].start || 0);
+        spkDur[sp] = (spkDur[sp] || 0) + (d2 > 0 ? d2 : 0);
+      }
+      var uniqueSpeakers = Object.keys(spkDur);
+
+      // 이름 매핑 테이블 구성
+      var nameMap = {};
+      if (uniqueSpeakers.length <= 2) {
+        // 표준 1:1 통화
+        for (var s1 = 0; s1 < uniqueSpeakers.length; s1++) {
+          nameMap[uniqueSpeakers[s1]] = (uniqueSpeakers[s1] == firstSpeaker) ? counterpartName : '나';
+        }
+      } else {
+        // 3명 이상: 발화량 최다 화자를 '나'(주로 본인이 가장 많이 말함), 첫 화자는 상대방, 나머지는 상대방2/3
+        var maxSp = uniqueSpeakers[0];
+        for (var s2 = 1; s2 < uniqueSpeakers.length; s2++) {
+          if (spkDur[uniqueSpeakers[s2]] > spkDur[maxSp]) maxSp = uniqueSpeakers[s2];
+        }
+        var otherIdx = 1;
+        for (var s3 = 0; s3 < uniqueSpeakers.length; s3++) {
+          var spk3 = uniqueSpeakers[s3];
+          if (spk3 == maxSp) nameMap[spk3] = '나';
+          else if (spk3 == firstSpeaker) nameMap[spk3] = counterpartName;
+          else { otherIdx++; nameMap[spk3] = counterpartName + otherIdx; }
+        }
+        // 첫 화자가 곧 최다발화자인 경우 보정: 첫 화자=상대방 우선
+        if (maxSp == firstSpeaker) nameMap[firstSpeaker] = counterpartName;
+      }
+
       var script = [];
       for (var ui = 0; ui < utts.length; ui++) {
         var u = utts[ui];
-        var spk = (u.speaker === firstSpeaker) ? counterpartName : '나';
+        var spk = nameMap[u.speaker] || ('상대방');
         var cleanTxt = _cleanHallucination((u.transcript || '').trim());
         if (cleanTxt.length > 0) {
           script.push({
@@ -3769,7 +3857,7 @@ async function _splitBySilence(blob) {
         }
       }
 
-      console.log('[Deepgram] ✅ 화자분리 성공:', script.length, '개 발화');
+      console.log('[Deepgram] ✅ 화자분리 성공:', script.length, '개 발화 / 화자', uniqueSpeakers.length, '명');
       return script.length > 0 ? script : null;
     } catch(e) {
       console.warn('[Deepgram] 예외 → Groq 폴백:', e.message);
@@ -4823,13 +4911,9 @@ async function startManualDiarization(id) {
 
         await delay(300);
         stageActive(2);
-        pLog('[DEEPGRAM] Nova-2 엔진 연결 중...', 'deepgram');
-        pLog('[DEEPGRAM] 파라미터: diarize=true / utt_split=0.8s ✓', 'deepgram');
+        pLog('[DEEPGRAM] nova-2-phonecall 엔진 연결 중...', 'deepgram');
+        pLog('[DEEPGRAM] 파라미터: diarize_model=latest (화자분리 v2) ✓', 'deepgram');
 
-        if (typeof window.convertToScript !== 'function') {
-          pLog('[ERROR] convertToScript 함수를 찾을 수 없습니다. 페이지를 새로고침하세요.', 'error');
-          throw new Error('convertToScript is not defined');
-        }
         if (typeof window.convertToScript !== 'function') {
           pLog('[ERROR] convertToScript 함수를 찾을 수 없습니다. 페이지를 새로고침하세요.', 'error');
           throw new Error('convertToScript is not defined');
@@ -4854,17 +4938,41 @@ async function startManualDiarization(id) {
 
         await _cvtPromise;
 
+        // [정직성 보완] 연출이 아닌 실제 변환 결과를 DB에서 읽어 화면에 반영
+        var _resultMem = await DB.getMemory(id);
+        var _realCount = 0, _realSpeakers = [];
+        if (_resultMem && _resultMem.content && _resultMem.content.trim().indexOf('[') === 0) {
+          try {
+            var _segsR = JSON.parse(_resultMem.content);
+            if (Array.isArray(_segsR)) {
+              _realCount = _segsR.length;
+              var _spkSet = {};
+              _segsR.forEach(function(s){ if (s.speaker) _spkSet[s.speaker] = 1; });
+              _realSpeakers = Object.keys(_spkSet);
+            }
+          } catch(e) {}
+        }
+
         await delay(400);
-        setProgress(100, '파이프라인 전 과정 완료 ✓');
-        pLog('[GEMINI] 화자 최종 이름표 배치 완료 ✓', 'success');
-        pLog('[SYSTEM] PIPELINE COMPLETE ✓', 'success');
-        stageDone(3, '교정 완료', '✓ Done', '#8b5cf6');
+        if (_realCount >= 2) {
+          setProgress(100, '실제 분리 완료: ' + _realCount + '개 발화 ✓');
+          pLog('[RESULT] 실제 분리 발화 ' + _realCount + '개 / 화자 ' + _realSpeakers.length + '명 (' + _realSpeakers.join(', ') + ')', 'success');
+          pLog('[SYSTEM] PIPELINE COMPLETE ✓', 'success');
+          stageDone(3, '교정 완료', _realCount + '개', '#8b5cf6');
+        } else {
+          // 결과가 비었으면 정직하게 경고 (가짜 성공 표시 금지)
+          setProgress(100, '분리 결과 부족 — 텍스트만 저장됨');
+          pLog('[RESULT] ⚠️ 화자분리 결과가 충분치 않습니다. (발화 ' + _realCount + '개)', 'warn');
+          pLog('[HINT] Deepgram 키 확인 또는 더 긴 통화 파일로 재시도하세요.', 'warn');
+          stageFail(3, '결과 부족');
+        }
 
         var hdPulse = document.getElementById('hd-pulse');
         if (hdPulse) { hdPulse.style.background = '#6366f1'; hdPulse.style.animation = 'none'; }
 
         await delay(1200);
-        UI.toast('🎯 Deepgram+Gemini 하이브리드 분석 완료!', 'success');
+        if (_realCount >= 2) UI.toast('🎯 화자분리 완료: 발화 ' + _realCount + '개 / 화자 ' + _realSpeakers.length + '명', 'success');
+        else UI.toast('⚠️ 화자분리 결과가 부족합니다. 텍스트만 저장되었습니다.', 'info');
 
       } catch(err) {
         pLog('[ERROR] 분석 중 예외: ' + err.message, 'error');
@@ -6157,7 +6265,27 @@ async function setupFakePin() {
     return { init, navigate, goBack, goForward, canGoForward, getHistoryLength };
   })();
   window.addEventListener('DOMContentLoaded', () => {
-    App.init();
+    // [안전장치] Dexie(DB 라이브러리)가 CDN에서 아직 안 떴으면 최대 5초간 기다렸다 시작
+    function _waitDexieThenInit(tries){
+      if (typeof window.Dexie !== 'undefined') {
+        App.init();
+        return;
+      }
+      if (tries <= 0) {
+        // 모든 CDN 실패 — 흰 화면 대신 안내 표시
+        var app = document.getElementById('app');
+        if (app) app.innerHTML = '<div style="padding:40px;text-align:center;color:#e2e8f0;">'
+          + '<div style="font-size:48px;margin-bottom:16px;">📡</div>'
+          + '<h2 style="font-size:18px;font-weight:bold;margin-bottom:8px;">네트워크 연결을 확인해 주세요</h2>'
+          + '<p style="font-size:13px;color:#94a3b8;line-height:1.7;">앱 구동에 필요한 라이브러리를 불러오지 못했습니다.<br>인터넷 연결 후 새로고침하면 정상 작동합니다.</p>'
+          + '<button onclick="location.reload()" style="margin-top:20px;padding:10px 24px;border-radius:10px;background:#6366f1;color:#fff;border:none;font-size:14px;cursor:pointer;">🔄 새로고침</button>'
+          + '</div>';
+        console.error('[App] Dexie 로드 실패 — 네트워크 확인 필요');
+        return;
+      }
+      setTimeout(function(){ _waitDexieThenInit(tries - 1); }, 250);
+    }
+    _waitDexieThenInit(20); // 250ms × 20 = 최대 5초 대기
 
     // ✅ 삼성 갤럭시 하드웨어 뒤로가기(<) 버튼 호환
     // 앱 진입 시 초기 히스토리 스택 생성
