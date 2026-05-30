@@ -3530,13 +3530,20 @@ async function _splitBySilence(blob) {
       var dur  = seg.durationSec;
       var spk  = null;
 
-      // ── 원칙 1: 전화통화 황금률 ──
-      // 첫 번째 발화는 무조건 수신자(상대방)
-      // 전화는 항상 받는 사람이 먼저 "여보세요"
+      // ── 원칙 1: 첫 발화 처리 (그때그때 다름 모드) ──
+      // [수정] 통화마다 누가 먼저 거는지 다르므로 강제 고정 제거.
+      // 첫 발화는 "상대방"을 기본 추정값으로만 두고, 짧은 인사면 그대로,
+      // 길거나 업무용건이면 아래 점수 로직으로 재판정하도록 흘려보낸다.
+      // (목소리 구분은 Deepgram이 담당, 이름표가 틀리면 🔄 버튼으로 한 번에 반전)
       if (idx === 0) {
-        spk = counterpartName;
-        result.push({ speaker: spk, text: txt, start: seg.startSec, _rule: 'R1-첫발화=수신자' });
-        return;
+        var firstShort = (dur <= 1.5) && /^(여보|네|예|안녕)/.test(txt);
+        if (firstShort) {
+          // 짧은 인사 → 받은 쪽(상대방)일 확률이 높음 (기본 추정)
+          spk = counterpartName;
+          result.push({ speaker: spk, text: txt, start: seg.startSec, _rule: 'R1-첫인사추정' });
+          return;
+        }
+        // 길거나 용건이 섞인 첫 발화 → 점수 로직으로 판정 (아래로 진행)
       }
 
       // ── 원칙 2: 인사 구간 (0~3초) 특별 처리 ──
@@ -3817,12 +3824,15 @@ async function _splitBySilence(blob) {
         var d2 = (utts[k].end || 0) - (utts[k].start || 0);
         spkDur[sp] = (spkDur[sp] || 0) + (d2 > 0 ? d2 : 0);
       }
-      var uniqueSpeakers = Object.keys(spkDur);
+     var uniqueSpeakers = Object.keys(spkDur);
 
       // 이름 매핑 테이블 구성
       var nameMap = {};
       if (uniqueSpeakers.length <= 2) {
-        // 표준 1:1 통화
+        // [수정] 표준 1:1 통화 — "그때그때 다름" 모드
+        // 첫 화자=상대방 강제 고정을 유지하되(통계상 받는 전화가 많음),
+        // Deepgram의 목소리 물리 구분(A/B)은 100% 신뢰한다.
+        // 이름표가 반대면 사용자가 🔄 화자 반전 버튼으로 한 번에 교정.
         for (var s1 = 0; s1 < uniqueSpeakers.length; s1++) {
           nameMap[uniqueSpeakers[s1]] = (uniqueSpeakers[s1] == firstSpeaker) ? counterpartName : '나';
         }
